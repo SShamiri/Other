@@ -1,0 +1,24 @@
+library(wakefield)
+# sim data
+n = 1000
+dat = r_data_frame(n = n,
+             dummy(name ='CONNAT',prob = c(0.7,0.3)),
+             dummy(name ='ADVENG'),
+             age(x = 18:65, name='Age'),
+             dummy(name = 'SEX'),
+             dummy(name = 'UNDER15'),
+             dummy(name = 'MESC'),
+             dummy(name = 'MARSTAT'),
+             sentence(c('1.post-grad','2.bachelors','3.diploma/adv diploma','4.cert II/IV','5.year12','6.year 11 and below'),
+                         name = 'HEAP', prob = c(0.2,0.2,0.15,0.15,0.1,0.25)),
+             DSEIFAA = sample(1:10,n,replace = T),
+             WKLYINCQ = sample(1:5,n,replace = T),
+             REMOTE = sample(1:5,n,replace = T),
+             AGEGRP = sample(1:14,n,replace = T),
+             LFSTATUS = sample(1:3,n,replace = T),
+             OCC1DIG = sample(1:3,n,replace = T)
+             
+             
+)
+
+dat = dat %>% tbl_df()
