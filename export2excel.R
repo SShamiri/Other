@@ -108,6 +108,8 @@ exportToexcel = function(outputList, fileName = 'psm_output'){
  
    xlsx.addTable(wb, diagnostic, data.frame(v = c('Common support') ),fontColor="darkblue", fontSize=14,
                 rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=1,col.names = F)
+   xlsx.addTable(wb, diagnostic, data.frame(v = c('Distribution of Propensity Scores') ),fontColor="darkblue", fontSize=14,
+                 rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=7,col.names = F)
    xlsx.addTable(wb, diagnostic, data.frame(v = c('Match results') ),fontColor="darkblue", fontSize=14,
                  rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=12,col.names = F)
    
@@ -125,7 +127,13 @@ exportToexcel = function(outputList, fileName = 'psm_output'){
    # Add the plot 
    addPicture("psmPlot.png", diagnostic, scale = 1, startRow = 7, startColumn = 3)
    # Remove the plot from the disk
-   res = file.remove("psmPlot.png")
+   res1 = file.remove("psmPlot.png")
+   ###############
+   png("psPlot.png", height=800, width=800, res=250, pointsize=8)
+   jitter.p(outTest$models[[1]])
+   dev.off()
+   addPicture("psPlot.png", diagnostic, scale = 1, startRow = 7, startColumn = 7)
+   res = file.remove("psPlot.png")
   # match diag
    Original_num_obs =  nrow(dd$models[[1]]$matchedData)
    match_num_obs =  dd$models[[1]]$matchMod$orig.nobs 
@@ -184,7 +192,10 @@ exportToexcel = function(outputList, fileName = 'psm_output'){
     barplot(out$right, col="blue", horiz=TRUE, space=0, add=TRUE, axes=FALSE)
     dev.off()
     
-
+    png("psPlot.png", height=800, width=800, res=250, pointsize=8)
+    jitter.p(outTest$models[[i]])
+    dev.off()
+    
     xlsx.addHeader(wb, psmSheet, value=names(dd$models)[i] ,level=3, color="black", underline=2,
                    startRow = n + h ,startCol =1)
      xlsx.addTable(wb, psmSheet, data.frame(v = c('Pre-Match model') ),fontColor="darkblue", fontSize=14,
@@ -206,13 +217,18 @@ exportToexcel = function(outputList, fileName = 'psm_output'){
                    startRow = m + h ,startCol =1)
     xlsx.addTable(wb, diagnostic, data.frame(v = c('Common support') ),fontColor="darkblue", fontSize=14,
                   rowFill=c("white", "lightblue"),row.names=F,startRow = m + p ,startCol=1,col.names = F)
+    xlsx.addTable(wb, diagnostic, data.frame(v = c('Distribution of Propensity Scores') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),row.names=F,startRow = m + p ,startCol=7,col.names = F)
     xlsx.addTable(wb, diagnostic, data.frame(v = c('Match results') ),fontColor="darkblue", fontSize=14,
                   rowFill=c("white", "lightblue"),row.names=F,startRow = m + p ,startCol=12,col.names = F)
     
     addPicture("psmPlot.png", diagnostic, scale = 1, startRow = m + t, startColumn = 3)
+    addPicture("psPlot.png", diagnostic, scale = 1, startRow = m + t, startColumn = 7)
+    
     xlsx.addTable(wb, diagnostic, matchDiag,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),
                   startRow = m + t ,startCol=12)
     res = file.remove("psmPlot.png")
+    res1 = file.remove("psPlot.png")
     n0 = n 
     m0 = m 
     
