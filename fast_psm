@@ -1,0 +1,543 @@
+
+fast_psm = function(Treat, outcome ,xvars ,baseVar, data = data,  caliper =0.2) {
+  Y = data[,outcome]
+  Tr = data[,Treat]
+  Xvars = data[,xvars]
+  dat = cbind(Y,Tr,Xvars)
+  compVars = unique(Tr) %>% pull
+  compVars = compVars[!(compVars %in% baseVar)]
+  modDat = dat %>% mutate(HEAP_num = ifelse(HEAP == !!compVars,1,0))
+  depn = colnames(Y)
+  pscore = glm(HEAP_num ~ ., data = modDat %>% select(-HEAP), family = binomial() )
+  modDat$Pscores = pscore$fitted.values
+  predValues  =  predict(pscore)
+  psTreated  =  predValues[modDat$HEAP_num == 1]
+  psUntreated  =  predValues[modDat$HEAP_num == 0]
+  outNN = macthNN(predValues, psTreated, psUntreated)
+  matchedData = modDat[outNN,]
+  X = colnames(modDat)
+  rem = c(depn,'HEAP','Pscores')
+  X = X[!X %in% rem]
+  f = as.formula(paste(depn,'~', paste(X,collapse = '+') ))
+  preMatch = glm(f, data = modDat, family = binomial() )
+  postMatch = glm(f, data = matchedData, family = binomial() )
+  OR = data.frame(exp(cbind(OR = coef(postMatch), confint.default(postMatch, level = 0.95))))
+  names(OR)[2:3] = c('2.5%','97.5%')
+  propTest = prop.test(table(matchedData$HEAP_num,matchedData[,outcome]))
+  x_squared = propTest$statistic
+  pValue = propTest$p.value
+  confL = propTest$conf.int[1]
+  confU = propTest$conf.int[2]
+  propTest = data.frame(value = c(x_squared,pValue,confL,confU))
+  row.names(propTest) = c('X squared','P-value','Lower-CI (95%)', 'Upper-CI (95%)' )
+  cat('\nHEAP model for : ', compVars,'\n')
+  outList = list(HEAPmodel =compVars ,preMatchModel = tidy(preMatch), postMatchModel = tidy(postMatch) , oddRatio = OR,  propTest = propTest,
+                 DataPostMatch = matchedData, outcomeVar = depn)
+  #names(outList) = compVars
+  return(outList)
+}
+
+
+#test = fast_psm('HEAP', 'CONNAT' ,c('ADVENG','SEX','Age') ,'6.year 11 and below', data = postgrad)
+
+
+pscore_jitter =  function(listObj, pch=16,cex=0.5){
+  treat =listObj$DataPostMatch$HEAP_num
+  pscore =listObj$DataPostMatch$Pscores
+  weights =1
+  matched = weights!=0
+  #q.cut = x$q.cut
+  q.cut = NULL
+  jitp = jitter(rep(1,length(treat)),factor=6)+(treat==1)*(weights==0)-(treat==0)-(weights==0)*(treat==0)
+  cwt = sqrt(weights)
+  minp = min(pscore,na.rm=T)
+  maxp = max(pscore,na.rm=T)
+  plot(pscore,xlim=c(minp,maxp+0.1*(maxp-minp)),ylim=c(-1.5,2.5),
+       type="n",ylab="",xlab="Propensity Score",
+       axes=F,main="Distribution of Propensity Scores")
+  if(!is.null(q.cut)){abline(v=q.cut,col="grey",lty=1)}
+  if(is.null(cex)){
+    points(pscore[treat==1&weights!=0],jitp[treat==1&weights!=0],
+           pch=pch,cex=cwt[treat==1&weights!=0],col='red')
+    points(pscore[treat==0&weights!=0],jitp[treat==0&weights!=0],
+           pch=pch,cex=cwt[treat==0&weights!=0],col='blue')
+    points(pscore[treat==1&weights==0],jitp[treat==1&weights==0],
+           pch=pch,cex=1,col='red')
+    points(pscore[treat==0&weights==0],jitp[treat==0&weights==0],
+           pch=pch,cex=1,col='blue')
+  }else{
+    points(pscore[treat==1&weights!=0],jitp[treat==1&weights!=0],
+           pch=pch,cex=cex,col='red')
+    points(pscore[treat==0&weights!=0],jitp[treat==0&weights!=0],
+           pch=pch,cex=cex,col='blue')
+    points(pscore[treat==1&weights==0],jitp[treat==1&weights==0],
+           pch=pch,cex=cex,col='red')
+    points(pscore[treat==0&weights==0],jitp[treat==0&weights==0],
+           pch=pch,cex=cex,col='blue')
+  }
+  axis(1)
+  text(sum(range(na.omit(pscore)))/2,2.5,"Unmatched Treatment Units")
+  text(sum(range(na.omit(pscore)))/2,1.5,"Matched Treatment Units")
+  text(sum(range(na.omit(pscore)))/2,0.5,"Matched Control Units")
+  text(sum(range(na.omit(pscore)))/2,-0.5,"Unmatched Control Units")
+  box()
+  
+}
+
+
+
+exportToexcel = function(outputList, fileName = 'psm_output'){
+  #pkg = c('Matching','broom','xlsx','Hmisc','tidyverse')
+  #lapply(pkg, require, character.only = TRUE)
+  
+  dd = outputList
+  depn = dd[[1]]$outcomeVar
+  now = Sys.time()
+  fileName = paste0(format(now,"%Y%m%d_%H%M%S_"),fileName,'.xlsx')
+  
+  wb = createWorkbook(type="xlsx")
+  ### create sheets in the workbook
+  cont = createSheet(wb, sheetName = "Content")
+  overallSheet = createSheet(wb, sheetName = "Descriptives")
+  psmSheet = createSheet(wb, sheetName = "PSM results")
+  diagnostic = createSheet(wb, sheetName = "Assumption and match results")
+  oddRatio = createSheet(wb, sheetName = "Odds ratio")
+  
+  ### Add data to sheets
+  # content sheet
+  xlsx.addTable(wb, cont, data.frame(v = c('Workbook') ),fontColor="darkblue", fontSize=14,startRow = 1 ,
+                startCol=1,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('Test variable') ),fontColor="darkblue", fontSize=14,startRow =2 ,
+                startCol=1,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('Sheetname') ), fontSize=14,startRow =5 ,
+                startCol=1,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('Description') ), fontSize=14,startRow =5 ,
+                startCol=2,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('Descriptive') ), fontSize=12,startRow =6 ,
+                startCol=1,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('PSM results') ), fontSize=12,startRow =7 ,
+                startCol=1,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('Assumption and match results') ), fontSize=12,startRow =8 ,
+                startCol=1,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = c('Odds ratio') ), fontSize=12,startRow =9 ,
+                startCol=1,row.names =F,col.names = F)
+  # # add prog
+  pg1 = 'This is the analysis for ....'
+  pg2 = depn
+  pg3 = 'This table shows basic frequencies and proportions.'
+  pg4 = 'These tables show the coefficients, odds ratio and tests for pre-PSM and post-PSM'
+  pg5 = 'This examin the common support for treatment and control and the match results from PSM'
+  pg6 = 'this show the odds ratio for the treatment variable (HEAP) post-PSM'
+
+  xlsx.addTable(wb, cont, data.frame(v = pg1), fontSize=12,startRow =1,startCol=2,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = pg2), fontSize=12,startRow =2,startCol=2,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = pg3), fontSize=12,startRow =6,startCol=2,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = pg4), fontSize=12,startRow =7,startCol=2,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = pg5), fontSize=12,startRow =8,startCol=2,row.names =F,col.names = F)
+  xlsx.addTable(wb, cont, data.frame(v = pg6), fontSize=12,startRow =9,startCol=2,row.names =F,col.names = F)
+  
+  # sheet overall
+  # xlsx.addHeader(wb, overallSheet, value="Descriptives and tests",level=2, startRow = 1, 
+  #                startCol =1,color="black", underline=2)
+  # xlsx.addHeader(wb, overallSheet, value="Frequencies and one sample proportion test",level=4, 
+  #                startRow = 2, startCol =1,color="black", underline=0)
+  # xlsx.addLineBreak(overallSheet, 1)
+  # prpTbl = outTest$prop
+  # names(prpTbl)[2:5] = c('control_freq','treatment_freq','control_prop','treatment_prop')
+  # xlsx.addTable(wb, overallSheet, prpTbl,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=F)
+  
+  #sheet psm
+  xlsx.addHeader(wb, psmSheet, value="PSM models output",level=2, color="black", underline=0,startRow = 1 ,startCol =1)
+  xlsx.addHeader(wb, psmSheet, value= dd[[1]]$HEAPmode ,level=3, color="black", underline=2,startRow = 3 ,startCol =1)
+  # header as table
+  xlsx.addTable(wb, psmSheet, data.frame(v = c('Pre-Match model') ),fontColor="darkblue", fontSize=14,
+                rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=1,col.names = F)
+  xlsx.addTable(wb, psmSheet, data.frame(v = c('Post-Match model') ),fontColor="darkblue", fontSize=14,
+                rowFill=c("white", "lightblue"),startRow = 5 ,startCol=8,row.names =F,col.names = F)
+  xlsx.addTable(wb, psmSheet, data.frame(v = c('Post-Match odds ratio') ),fontColor="darkblue", fontSize=14,
+                rowFill=c("white", "lightblue"),startRow = 5 ,startCol=15,row.names =F,col.names = F)
+  xlsx.addTable(wb, psmSheet, data.frame(v = c('Post-Match 2 sample proption test') ),fontColor="darkblue", fontSize=14,
+                rowFill=c("white", "lightblue"),startRow = 5 ,startCol=21,row.names =F,col.names = F)
+  
+  pre_psm = data.frame(dd[[1]]$preMatchModel)
+  post_psm = data.frame(dd[[1]]$postMatchModel)
+  # conf = data.frame(exp(cbind(OR = coef(dd$models[[1]]$postMatch), confint.default(dd$models[[1]]$postMatch, level = 0.95))))
+  # names(conf)[2:3] = c('2.5%','97.5%') 
+  
+  #or[[1]] = data.frame(HEAP = names(outTest$models)[1],conf %>% filter(row.names(conf) %in% c('HEAP_num')),stringsAsFactors = F)
+  
+  or = dd[[1]]$oddRatio
+  propTest = dd[[1]]$propTest
+  
+  heap_or = list()
+  heap_or[[1]] = data.frame(HEAP = dd[[1]]$HEAPmodel,or %>% filter(row.names(or) %in% c('HEAP_num')),stringsAsFactors = F)
+  
+  xlsx.addTable(wb, psmSheet, pre_psm,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=F,startRow = 7 ,startCol =1)
+  xlsx.addTable(wb, psmSheet, post_psm,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=F,startRow = 7 ,startCol=8)
+  xlsx.addTable(wb, psmSheet, or,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=T,startRow = 7,startCol=15)
+  xlsx.addTable(wb, psmSheet, propTest,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=T,startRow = 7 ,startCol=21)
+  
+  #sheet Diagnistic
+  xlsx.addHeader(wb, diagnostic, value=" Examining the region of common support & match results",level=4, startRow = 1, 
+                 startCol =1,color="black", underline=0)
+  xlsx.addHeader(wb, diagnostic, value=dd[[1]]$HEAPmode ,level=3, color="black", underline=2,startRow = 3 ,startCol =1) 
+  
+  xlsx.addTable(wb, diagnostic, data.frame(v = c('Common support') ),fontColor="darkblue", fontSize=14,
+                rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=1,col.names = F)
+  xlsx.addTable(wb, diagnostic, data.frame(v = c('Distribution of Propensity Scores') ),fontColor="darkblue", fontSize=14,
+                rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=7,col.names = F)
+  # xlsx.addTable(wb, diagnostic, data.frame(v = c('Match results') ),fontColor="darkblue", fontSize=14,
+  #               rowFill=c("white", "lightblue"),row.names=F,startRow = 5 ,startCol=12,col.names = F)
+  
+  # Add the plot 
+  oc = dd[[1]]$DataPostMatch %>% select(!!depn,Pscores)
+  treatment = oc[oc[,1]==1,2]
+  control = oc[oc[,1]==0,2]
+  socres = dd[[1]]$DataPostMatch %>% select(Pscores) %>% pull
+  breaks =  seq(min(socres),max(socres),length.out = 15)
+  png("psmPlot.png", height=800, width=800, res=250, pointsize=8)
+  out = histbackback(treatment, control, probability=TRUE, main = 'Area of common support') #, brks = breaks
+  barplot(-out$left, col="red" , horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+  barplot(out$right, col="blue", horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+  dev.off()
+  # Add the plot 
+  addPicture("psmPlot.png", diagnostic, scale = 1, startRow = 7, startColumn = 3)
+  # Remove the plot from the disk
+  res1 = file.remove("psmPlot.png")
+  ###############
+  png("psPlot.png", height=800, width=800, res=250, pointsize=8)
+  pscore_jitter(dd[[1]])
+  dev.off()
+  addPicture("psPlot.png", diagnostic, scale = 1, startRow = 7, startColumn = 7)
+  res = file.remove("psPlot.png")
+  # match diag
+  # Original_num_obs =  nrow(dd$models[[1]]$matchedData)
+  # match_num_obs =  dd$models[[1]]$matchMod$orig.nobs 
+  # Estimate = dd$models[[1]]$matchMod$est
+  # SE = dd$models[[1]]$matchMod$se.standard
+  # matchDiag = data.frame(value = c(Original_num_obs,match_num_obs,Estimate,SE))
+  # rownames(matchDiag) = c('Original number of observations', 'Matched number of observations', 'Estimate','SE')
+  # xlsx.addTable(wb, diagnostic, matchDiag,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),startRow = 7 ,startCol=12)
+  
+  #sheet Odd ratio sheet
+  xlsx.addHeader(wb, oddRatio, value="Odds ratio for treatment variable",level=2, startRow = 1, 
+                 startCol =1,color="black", underline=0)
+  
+  # loop through
+  N = nrow(dd[[1]]$preMatchModel) +7
+  n0 = 0
+  M = 21
+  m0 = 0
+  h = 3
+  p = 5
+  t = 7
+  for(i in 2 : length(dd)) { #3
+    n = N + n0
+    m = M + m0
+    pre_psm = data.frame(dd[[i]]$preMatchModel)
+    post_psm = data.frame(dd[[i]]$postMatchModel)
+    or = dd[[i]]$oddRatio
+    propTest = dd[[i]]$propTest
+    heap_or[[i]] = data.frame(HEAP = dd[[i]]$HEAPmodel,or %>% filter(row.names(or) %in% c('HEAP_num')),stringsAsFactors = F)
+    
+    
+    # Original_num_obs =  nrow(dd$models[[i]]$matchedData)
+    # match_num_obs =  dd$models[[i]]$matchMod$orig.nobs 
+    # Estimate = dd$models[[i]]$matchMod$est
+    # SE = dd$models[[i]]$matchMod$se.standard
+    # matchDiag = data.frame(value = c(Original_num_obs,match_num_obs,Estimate,SE))
+    # rownames(matchDiag) = c('Original number of observations', 'Matched number of observations', 'Estimate','SE')
+    
+    # HEAP = c(dd$models[[i]]$matchedData$HEAP_num)
+    # outcomeVar = dd$models[[i]]$matchedData %>% select(!!depn) %>% pull
+    # propTest = prop.test(table(HEAP,outcomeVar))
+    # x_squared = propTest$statistic
+    # pValue = propTest$p.value
+    # confL = propTest$conf.int[1]
+    # confU = propTest$conf.int[2]
+    # propTest = data.frame(value = c(x_squared,pValue,confL,confU))
+    # row.names(propTest) = c('X squared','P-value','Lower-CI (95%)', 'Upper-CI (95%)' )
+    
+    
+    oc = dd[[i]]$DataPostMatch %>% select(!!depn,Pscores)
+    treatment = oc[oc[,1]==1,2]
+    control = oc[oc[,1]==0,2]
+    socres = dd[[i]]$DataPostMatch %>% select(Pscores) %>% pull
+    breaks =  seq(min(socres),max(socres),length.out = 15)
+    png("psmPlot.png", height=800, width=800, res=250, pointsize=8)
+    out = histbackback(treatment, control, probability=TRUE, main = 'Area of common support') #, brks = breaks
+    barplot(-out$left, col="red" , horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+    barplot(out$right, col="blue", horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+    dev.off()
+    
+    
+    png("psPlot.png", height=800, width=800, res=250, pointsize=8)
+    pscore_jitter(dd[[i]])
+    dev.off()
+    
+    xlsx.addHeader(wb, psmSheet, value= dd[[i]]$HEAPmode ,level=3, color="black", underline=2,
+                   startRow = n + h ,startCol =1)
+    xlsx.addTable(wb, psmSheet, data.frame(v = c('Pre-Match model') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),row.names=F,startRow = n + p ,startCol=1,col.names = F)
+    xlsx.addTable(wb, psmSheet, data.frame(v = c('Post-Match model') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),startRow = n + p ,startCol=8,row.names =F,col.names = F)
+    xlsx.addTable(wb, psmSheet, data.frame(v = c('Post-Match odds ratio') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),startRow = n + p ,startCol=15,row.names =F,col.names = F)
+    xlsx.addTable(wb, psmSheet, data.frame(v = c('Post-Match 2 sample proption test') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),startRow = n + p ,startCol=21,row.names =F,col.names = F)
+    #   
+    xlsx.addTable(wb, psmSheet, pre_psm,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=F,startRow = n+t ,startCol =1)
+    xlsx.addTable(wb, psmSheet, post_psm,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=F,startRow = n+t ,startCol=8)
+    xlsx.addTable(wb, psmSheet, or,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=T,startRow = n+t,startCol=15) 
+    xlsx.addTable(wb, psmSheet, propTest,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),row.names=T,startRow = n+t,startCol=21) 
+    
+    
+    xlsx.addHeader(wb, diagnostic, value= dd[[i]]$HEAPmode ,level=3, color="black", underline=2,
+                   startRow = m + h ,startCol =1)
+    xlsx.addTable(wb, diagnostic, data.frame(v = c('Common support') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),row.names=F,startRow = m + p ,startCol=1,col.names = F)
+    xlsx.addTable(wb, diagnostic, data.frame(v = c('Distribution of Propensity Scores') ),fontColor="darkblue", fontSize=14,
+                  rowFill=c("white", "lightblue"),row.names=F,startRow = m + p ,startCol=7,col.names = F)
+    # xlsx.addTable(wb, diagnostic, data.frame(v = c('Match results') ),fontColor="darkblue", fontSize=14,
+    #               rowFill=c("white", "lightblue"),row.names=F,startRow = m + p ,startCol=12,col.names = F)
+    
+    addPicture("psmPlot.png", diagnostic, scale = 1, startRow = m + t, startColumn = 3)
+    addPicture("psPlot.png", diagnostic, scale = 1, startRow = m + t, startColumn = 7)
+    
+    # xlsx.addTable(wb, diagnostic, matchDiag,fontColor="darkblue", fontSize=12,rowFill=c("white", "lightblue"),
+    #               startRow = m + t ,startCol=12)
+    res = file.remove("psmPlot.png")
+    res1 = file.remove("psPlot.png")
+    n0 = n 
+    m0 = m 
+    
+  }
+  
+  heap_or = bind_rows(heap_or)
+  names(heap_or)[3:4] = c('2.5%','97.5%') 
+  xlsx.addTable(wb, oddRatio, heap_or ,fontColor="darkblue", fontSize=12,
+                rowFill=c("white", "lightblue"),row.names=F,startRow = 3 ,startCol=1,col.names = T)
+  # save the workbook
+  saveWorkbook(wb, fileName)
+  cat('\n','#++++++THE RESULTS ARE SAVED in ++++++++++#','\n')
+  cat('\n',paste0(getwd(),'/',fileName),'\n')
+  cat('\n','#++++++++++++++++++++++++++++++++++++++++++#','\n')
+}
+
+### example
+# outTest = PSM(Treat = 'HEAP', outcome = 'CONNAT',xvars = c('DSEIFAA','WKLYINCQ','Age'), baseVar = '6.year 11 and below' ,data = dat,
+#               matchPar = list(estimand = "ATT", M = 1,ties=TRUE,caliper = NULL, replace=FALSE))
+# exportToexcel(outTest,fileName = 'psm_output')
+
+
+### help fun
+#### excel help functions
+xlsx.addHeader=function(wb, sheet, value="Header", level=1, color="#FFFFFF",
+                         startRow=NULL, startCol=2, underline=c(0,1,2))
+{
+  library("xlsx")
+  
+  if(color=="black") color="white"# black and white color are inversed in xlsx package. don't know why
+  # Define some cell styles within that workbook
+  H1_STYLE = CellStyle(wb) + Font(wb,  heightInPoints=22,color=color, isBold=TRUE, underline=underline[1])
+  H2_STYLE = CellStyle(wb) + Font(wb, heightInPoints=18, color=color, isItalic=FALSE, isBold=TRUE, underline=underline[1])
+  H3_STYLE = CellStyle(wb) + Font(wb, heightInPoints=16, color=color, isItalic=TRUE, isBold=TRUE, underline=underline[1])
+  H4_STYLE = CellStyle(wb) + Font(wb, heightInPoints=16, color=color, isItalic=TRUE, isBold=FALSE, underline=underline[1])
+  H5_STYLE = CellStyle(wb) + Font(wb, heightInPoints=14, color=color, isItalic=TRUE, isBold=FALSE, underline=underline[1])
+  H6_STYLE = CellStyle(wb) + Font(wb, heightInPoints=12, color=color, isItalic=TRUE, isBold=FALSE, underline=underline[1])
+  
+  #Append row to sheet
+  if(is.null(startRow)){
+    rows= getRows(sheet) #list of row object
+    startRow=length(rows)+1  
+  } 
+  
+  # Create the Sheet title and subtitle
+  rows = createRow(sheet,rowIndex=startRow)
+  sheetTitle = createCell(rows, colIndex=startCol)
+  setCellValue(sheetTitle[[1,1]], value)
+  if(level==1) xlsx::setCellStyle(sheetTitle[[1,1]], H1_STYLE)
+  else if(level==2) xlsx::setCellStyle(sheetTitle[[1,1]], H2_STYLE)
+  else if(level==3) xlsx::setCellStyle(sheetTitle[[1,1]], H3_STYLE)
+  else if(level==4) xlsx::setCellStyle(sheetTitle[[1,1]], H4_STYLE)
+  else if(level==5) xlsx::setCellStyle(sheetTitle[[1,1]], H5_STYLE)
+  else if(level==6) xlsx::setCellStyle(sheetTitle[[1,1]], H6_STYLE)  
+}
+
+xlsx.addParagraph=function(wb,sheet, value, fontColor="#FFFFFF", fontSize=12, backGroundColor="#FFFFFF",
+                            isBold=FALSE, isItalic=FALSE,
+                            startRow=NULL, startCol=2, colSpan=10, rowSpan=5)
+{
+  library("xlsx") 
+  #Append table to sheet
+  if(is.null(startRow)){
+    rows= getRows(sheet) #list of row object
+    startRow=length(rows)+1
+  }
+  rows = createRow(sheet,rowIndex=startRow)
+  sheetParagraph = createCell(rows, colIndex=startCol)
+  setCellValue(sheetParagraph[[1,1]], value)
+  #style
+  PARAGRAPH_STYLE = CellStyle(wb)+ 
+    Font(wb,  heightInPoints=fontSize,color=fontColor, isBold=isBold, isItalic=isItalic)+                          
+    Alignment(wrapText=TRUE, horizontal="ALIGN_JUSTIFY", 
+              vertical="VERTICAL_CENTER")
+  #background fill
+  if(!backGroundColor %in% c("white", "#FFFFFF")) 
+    PARAGRAPH_STYLE+Fill(backgroundColor=backGroundColor, foregroundColor=backGroundColor) 
+  xlsx::setCellStyle(sheetParagraph[[1,1]], PARAGRAPH_STYLE)
+  #Spanning region : -1, because we start to count from zero. 
+  #if not, an additionnal row or column are added to merged region
+  addMergedRegion(sheet, startRow, endRow=startRow+rowSpan-1, startCol, endColumn=startCol+colSpan-1) 
+  xlsx.addLineBreak(sheet, rowSpan) 
+}
+
+
+xlsx.addTable=function(wb, sheet, data, startRow=NULL,startCol=2,
+                        col.names=TRUE, row.names=TRUE, columnWidth=14,
+                        fontColor="#FFFFFF", fontSize=12, 
+                        rownamesFill="white", colnamesFill="white", 
+                        rowFill=c("white", "white")){
+  
+  library("xlsx")
+  #++++++++++++++++++++++++++++++++++++++
+  #Define table style
+  #++++++++++++++++++++++++++++++++++++++
+  #***Border position and pen value*****
+  #Border(color="black", position="BOTTOM", pen="BORDER_THIN"
+  #position :  Valid values are "BOTTOM", "LEFT", "TOP", "RIGHT"
+  # pen : valid values are BORDER_DASH_DOT,BORDER_DASH_DOT_DOT,BORDER_DASHED,BORDER_DOTTED,BORDER_DOUBLE,BORDER_HAIR,BORDER_MEDIUM,BORDER_MEDIUM_DASH_DOT,BORDER_MEDIUM_DASH_DOT_DOT,BORDER_MEDIUM_DASHED,BORDER_NONE,BORDER_SLANTED_DASH_DOT,BORDER_THICK,BORDER_THIN
+  #***Alignement value*****
+  #Alignment(horizontal=NULL, vertical=NULL, wrapText=FALSE, rotation=0, indent=0)
+  #HALIGN_STYLES_: "ALIGN_CENTER, ALIGN_JUSTIFY, ALIGN_LEFT, ALIGN_RIGHT"
+  #VALIGN_STYLES_: "VERTICAL_BOTTOM, VERTICAL_CENTER, VERTICAL_JUSTIFY, VERTICAL_TOP"
+  #Alignement :
+  TABLE_ROWNAMES_STYLE = CellStyle(wb) + Font(wb, isBold=TRUE, color=fontColor, 
+                                               heightInPoints=fontSize)
+  #rownames fill 
+  if(rownamesFill!="white") {
+    TABLE_ROWNAMES_STYLE =TABLE_ROWNAMES_STYLE+
+      Fill(foregroundColor = rownamesFill, 
+           backgroundColor=rownamesFill)
+  }
+  
+  
+  TABLE_COLNAMES_STYLE = CellStyle(wb) + 
+    Font(wb, isBold=TRUE, color=fontColor, heightInPoints=fontSize) +
+    Alignment(wrapText=TRUE, horizontal="ALIGN_CENTER") +
+    Border(color="black", position=c("TOP", "BOTTOM"), 
+           pen=c("BORDER_THIN", "BORDER_THICK"))
+  #colnames fill
+  if(colnamesFill!="white") {
+    TABLE_COLNAMES_STYLE =TABLE_COLNAMES_STYLE+
+      Fill(foregroundColor = colnamesFill,
+           backgroundColor=colnamesFill)
+  }
+  
+  #Append table to sheet
+  #get current active row of sheet
+  if(is.null(startRow)){
+    rows= getRows(sheet) #list of row object
+    startRow=length(rows)+1
+  } 
+  
+  #font color
+  col.n=ncol(data)
+  column.style=NULL
+  for(i in 1:col.n){
+    column.style[[i]]=CellStyle(wb, font=Font(wb, color=fontColor, heightInPoints=fontSize))
+  }
+  names(column.style)=as.character(1:ncol(data))
+  
+  # Add the table  to the sheet
+  addDataFrame(data, sheet, startRow=startRow, startColumn=startCol,
+               col.names=col.names, row.names=row.names,
+               colnamesStyle = TABLE_COLNAMES_STYLE, rownamesStyle=TABLE_ROWNAMES_STYLE,
+               colStyle=column.style) 
+  #Column width
+  #+++++++++++++++++++++++++++++++++++++++
+  colIndex=1:(ncol(data)+startCol)
+  xlsx::setColumnWidth(sheet, colIndex=colIndex, colWidth=columnWidth)
+  
+  #Table styling
+  #+++++++++++++++++++++++++++++++++++++++
+  if(!all(rowFill==c("white", "white"))){
+    col.n =ncol(data)
+    row.n=nrow(data)
+    if(col.names==TRUE) col.n=col.n+1
+    if(row.names==TRUE) row.n=row.n+1
+    cb=CellBlock(sheet, startRow=startRow, startColumn=startCol, 
+                  noRows=row.n, noColumns=col.n, create=FALSE )
+    #color pair row for styling
+    for(i in 1: nrow(data)){ 
+      if(i%%2==0) CB.setFill( cb, fill=Fill(foregroundColor = rowFill[2], backgroundColor=rowFill[2]),
+                              rowIndex=i, colIndex=1:col.n)
+      else CB.setFill( cb, fill=Fill(foregroundColor = rowFill[1], backgroundColor=rowFill[1]),
+                       rowIndex=i, colIndex=1:col.n)
+    }
+    
+  }
+}
+
+
+xlsx.addPlot=function( wb, sheet, plotFunction, startRow=NULL,startCol=2,
+                        width=480, height=480,... )
+  
+{
+  library("xlsx")
+  png(filename = "plot.png", width = width, height = height,...)
+  plotFunction()
+  dev.off() 
+  #Append plot to the sheet
+  if(is.null(startRow)){
+    rows= getRows(sheet) #list of row object
+    startRow=length(rows)+1
+  } 
+  # Add the file created previously
+  addPicture("plot.png", sheet=sheet,  startRow = startRow, startColumn = startCol) 
+  xlsx.addLineBreak(sheet, round(width/20)+1)
+  res=file.remove("plot.png")
+}
+
+
+# Author: Samuel Shamiri
+# date : 19/10/2018
+# purpose : propensity score matching 
+# output: returns a vector of indexs that has a match
+#
+
+match_nn = function(predValues, psTreated, psUntreated, caliper = 0.2 ) {
+  # find matches, require be within 20% of a sd of the unmatched ps
+  matches  =  vector()
+  limit  =  caliper * sd(predValues)
+  for (i in 1:length(psTreated)) {
+    x  =  psTreated[i]
+    distance  =  (x - psUntreated)^2
+    if (min(distance) <= limit) {
+      nn  =  which.min(distance)
+      psUntreated[nn]  =  .Machine$integer.max
+      matches[i]  =  c(nn) 
+    } else {
+      matches[i]  =  c(NA)
+    }
+    
+  }
+  matches = matches[!is.na(matches)]
+}
+
+# compile into bytecode
+require(compiler)
+macthNN = cmpfun(match_nn)
+
+## example
+# predValues  =  predict(pscore)
+# psTreated  =  predValues[postgrad$HEAP_num == 1]
+# psUntreated  =  predValues[postgrad$HEAP_num == 0]
+# 
+# outcpp = macthNN(predValues, psTreated, psUntreated)
+# Sys.time() - start
+# head(outcpp)
+# length(outcpp)
+
+
+
