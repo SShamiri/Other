@@ -1,0 +1,2670 @@
+
+/* 
+
+D-MAC 2.3
+
+Authors: 			Noel Hansen / Kelly Chiu
+
+Acknowledgements: 	Peter Rossiter (marginal uniqueness rate)
+					James Chipperfield (precision estimator)
+					Damien Melksham (code for Winkler and Damerau-Levenshtein functions)
+					DLC and DIACMU staff (suggested improvements such as naming, input validation and multi-record data structure)
+
+New in V2.3:		Three percent (instead of one percent) of links moving average applied to marginal uniqueness rate in output.
+					Marginal uniqueness rate plotted as step function.
+					Optional parameter STAGE_THRESHOLD to re-calculate duplicate rates.  Leaving parameter out will not cause errors (can use V2.1 template).
+					Optional parameter MIN_UNIQUENESS_RATE to set stopping point for re-calculating duplicate rates.  Defaults to 0.8 if left blank.
+					Duplicate Rate and Marginal Uniqueness Rates are based on pairs instead of records on Input Dataset 1.
+					At the end of the macro, Uniqueness Rate replaced Duplicate Rate in output to simplify terminology.
+					Deduplication mode when second input dataset isn't specified.
+					Secondary ID added.
+					Exist function in %if condition at Line 39.
+					
+*/
+
+data time_record;
+	start=datetime();
+run;
+
+
+options compress=yes nosymbolgen nomlogic mprint source;
+
+
+
+
+/* MACROS/FUNCTIONS. */
+
+/* Winkler and Damerau-Levenshtein functions. */
+%macro define_functions;
+	%if not %sysfunc(exist(winkdam)) %then %do;	
+		PROC FCMP outlib=work.winkdam.stringcomps;
+			FUNCTION winkler(string_1 $,string_2 $,score);
+				if STRING_1='' THEN
+					return('');
+				else if STRING_2='' THEN
+					return('');
+				else if STRING_1=STRING_2 THEN
+					return(1);
+				else
+					do;
+						length1=length(string_1);
+						if length1>26 then
+							length1=26;
+						length2=length(string_2);
+						if length2>26 then
+							length2=26;
+						range=(int(max(length1,length2)/2)-1);
+						big=max(length1,length2);
+						short=min(length1,length2);
+						i=1;
+						array String1{26} $ 1 _temporary_;
+						array String2{26} $ 1 _temporary_;
+						array String1Match{26} $ 1 _temporary_;
+						array String2Match{26} $ 1 _temporary_;
+						/*The following two do loops place the characters into arrays labelled string1 and string2. 
+						While we are here, we also set a second array of the same dimensions full of zeros.  This will
+						act as our match key, whereby values in the same relative position as those in the original string
+						will be set to 1 when we find a valid match candidate later on.*/
+						do while (i<=length1);
+							String1{i}=UPCASE(substr(string_1,i,1));
+							String1Match{i}='0';
+							i=i+1;
+						end;
+						i=1;
+						do while (i<=length2);
+							String2{i}=UPCASE(substr(string_2,i,1));
+							String2Match{i}='0';
+							i=i+1;
+						end;
+						/*We set i back to 1, and introduce m, which will keep track of the number of matches */
+						i=1;
+						m=0;
+						/*We set a loop to compare one string with the other.  We only need to loop the same number of
+						times as there are characters in one of our strings.  Hence "do while i<=length1".
+						We set the allowable search range for a character using pos and endpos, and set another loop to
+						search through this range.  We loop through until we find our first match, or until we hit
+						the end of our search range.  If the character in string 2 is already signed to a match, we move
+						on to searching the next character.  When we find a match, the match flag for that character in both
+						strings is set to 1.  Hopefully by the end of the loop, we have match flags for our two arrays set.
+						*/
+						do while (i<=length1);
+							pos=max(i-range,1);
+							endpos=min(range+i,length2);
+							do while (pos<=endpos and String1Match{i}^='1');
+								if String1{i}=String2{pos} and String2Match{pos}^='1' then
+									do;
+										m=m+1;
+										String1Match{i}='1';
+										String2Match{pos}='1';
+									end;
+
+								pos=pos+1;
+							end;
+							i=i+1;
+						end;
+						/* If there are no matching characters, we do not bother with any more work, and say the two strings are not alike at all */
+						IF m=0 then
+							goto calculation;
+						/* If m=1, we check the first letter of the two strings.  If it matches, then there is 1 common character at the start of the string */
+						else if m=1 and String1{1}=String2{1} then
+							do;
+								t=0;
+								s=1;
+							end;
+						/* If m=1 and the first letter of the two strings did not match, then there are no transpositions, but the strings do not have
+						a common character at the start of the string */
+						else if m=1 then
+							do;
+								t=0;
+								s=0;
+							end;
+						/* If those three conditions all fail, then we move onto the heavy lifting.*/
+						else
+							do;
+								/* We set i back to 1, ready for another looping run.  
+								c is a variable to track the position of the next valid transposition check.
+								j is a variable helping to keep track of matching characters found during the next loop inside string 1.
+								k is a variable helping to keep track of matching characters found during the next loop inside string 2.
+								s will be the number of common characters at the start of the string with a maximum of 4.
+								t will be the number of tranpositions found.
+								*/
+								i=1;
+								c=1;
+								k=0;
+								j=0;
+								s=0;
+								t=0;
+								/* We begin our loop.  These conditional loops within loops 
+								make several logical conclusions to arrive at the correct number of transpositions and matching characters 
+								at the beginning of a string.  At the end of this we should have every variable we need to calculate the winkler
+								score (and theoretically the jaro as well).  I'm not going to write out an explanation here, but if you're
+								interested all the extra variables are defined just above this comment, and I've already told you what the
+								string arrays are.  Work through a couple of examples with pen and paper, or in your head, to see how 
+								and why it works.*/
+								do while (j<m OR k<m);
+									IF j<m then
+										do;
+											IF String1Match{i}='1' THEN
+												DO;
+													j=j+1;
+													String1{j}=String1{i};
+												end;
+										end;
+									IF k<m then
+										do;
+											IF String2Match{i}='1' THEN
+												DO;
+													k=k+1;
+													String2{k}=String2{i};
+												end;
+										end;
+									IF j>=c and k>=c then
+										do;
+											IF String1{c}^=String2{c} then
+												t=t+1;
+											ELSE IF c=s+1 AND c<=4 AND c=i THEN
+												s=s+1;
+											c=c+1;
+										end;
+									i=i+1;
+								end;
+							end;
+						/* Finally, we do the calculation of the scores */
+				calculation:
+						IF m=0 THEN
+							return(0);
+						else
+							do;
+								jaro=(1/3)*((m/length1)+(m/length2)+((m-(t/2))/m));
+								winklertest=jaro+((s*score)*(1-jaro));
+							end;
+						return(winklertest);
+					end;
+			endsub;
+
+			/*Added in a function for calculating Damerau-Levenshtein distance. Damerau Levenshtein is useful as it allows us to treat transpositions
+			as being 1 edit instead of 2.*/
+			function damerau(string_1 $,string_2 $);
+			/* Having at least one blank value will not return a score.*/
+				if string_1='' then
+					return(.);
+				else if string_2='' then
+					return(.);
+				else if string_1=string_2 then
+			/* Values that match exactly receive a score of 0*/
+					return(0);
+				else
+					do;
+			/* 'Call compcost' is used to define the edits associated with each kind of error. In tradtional levenshtein, the 'swap' value would be 2,
+			but as we desire the damerau version we make it a value of 1.*/
+						call compcost('match=',0,'insert=',1,'delete=',1,'replace=',1,'append=',1,'truncate=',1,'double=',1,'single=',1,'swap=',1,
+							'blank=',1,'punctuation=',1,'finsert=',1,'freplace=',1);
+			/* The 'compged' function is now uses the values defined above to calculate the damerau edit distance of 2 non-matching values.*/
+						damlev = compged(string_1,string_2);
+						return(damlev);
+					end;
+			endsub;
+
+			options cmplib=work.winkdam;
+		run;
+	%end;
+%mend;
+
+%define_functions;
+
+
+
+
+%macro dedup_mode_libraries;
+	libname indata_a "&input_folder_a";
+	libname outdata "&output_folder";
+	libname agrdata "&agreements_folder";
+	%global dedupmode;
+	%if %length(&dataset_b)=0 %then %do;
+		%let dedupmode=1;
+		%let no_filter_vars=0;
+		%let no_priorities=0;
+		%let sort_by=duplicate_rate;
+		%let stage_threshold=;
+		%let input_folder_b=&output_folder;
+		%let dataset_b=dataset_b_temp;
+		%let id_b=&id_a._2;
+		%if %length(&secondary_id_a)>0 %then %let secondary_id_b=&secondary_id_a._2;;
+		%let variables_to_compare_b=&variables_to_compare_a;
+		data outdata.dataset_b_temp;
+			set indata_a.&dataset_a;
+			rename &id_a=&id_a._2; 
+			%if %length(&secondary_id_a)>0 %then rename &secondary_id_a=&secondary_id_a._2;;
+		run;
+	%end;
+	%else %let dedupmode=0;
+	libname indata_b "&input_folder_b";
+%mend;
+	
+
+
+
+/* Check inputs for common errors. */
+%macro validate_inputs;
+	/* Equal lengths. */
+	%let l_variables_to_compare_a=%sysfunc(countw(&variables_to_compare_a,"+",s));
+	%let l_variables_to_compare_b=%sysfunc(countw(&variables_to_compare_b,"+",s));
+	%let l_components=%sysfunc(countw(&components,"+",s));
+	%let l_comparators=%sysfunc(countw(&comparators,"+",s));
+	%let l_var_lengths=%sysfunc(countw(&var_lengths,"+",s));
+	%let l_m_probs=%sysfunc(countw(&m_probs,"+",s));
+	%let l_u_probs=%sysfunc(countw(&u_probs,"+",s));
+	%if &l_variables_to_compare_a^=&l_variables_to_compare_b or &l_variables_to_compare_a^=&l_components or &l_variables_to_compare_a^=&l_comparators %then %do;
+		%put ERROR: LINKING_VARIABLES_1, LINKING_VARIABLES_2, LINKING_VARIABLE_COMPARATORS and COMPARISON_NAMES have different numbers of items.;
+		%abort abend;
+	%end;
+	%if &l_var_lengths>0 and &l_var_lengths^=&l_variables_to_compare_a %then %do;
+		%put ERROR: VARIABLE_LENGTHS has a different number of items to LINKING_VARIABLES_1, LINKING_VARIABLES_2, LINKING_VARIABLE_COMPARATORS and COMPARISON_NAMES.;
+		%abort abend;
+	%end;
+	%if &l_m_probs>0 and &l_m_probs^=&l_variables_to_compare_a %then %do;
+		%put ERROR: M_PROBABILITIES_GLOBAL has a different number of items to LINKING_VARIABLES_1, LINKING_VARIABLES_2, LINKING_VARIABLE_COMPARATORS and COMPARISON_NAMES.;
+		%abort abend;
+	%end;
+	%if &l_u_probs>0 and &l_u_probs^=&l_variables_to_compare_a %then %do;
+		%put ERROR: U_PROBABILITIES_GLOBAL has a different number of items to LINKING_VARIABLES_1, LINKING_VARIABLES_2, LINKING_VARIABLE_COMPARATORS and COMPARISON_NAMES.;
+		%abort abend;
+	%end;
+	/* Invalid comparators. */
+	data _null_;
+		length comparator $15.;
+		%do i=1 %to &l_variables_to_compare_a;
+			comparator=scan("&comparators",&i,'+','s');
+			if length(comparator)>=7 then do;
+				if substr(comparator,1,7)='damerau' then do;
+					threshold=substr(comparator,8,(length(comparator)-7));
+					comparator='damerau';
+					if threshold-int(threshold)^=0 or threshold<=0 then do;
+						put 'ERROR: One or more of the damerau thresholds in LINKING_VARIABLE_COMPARATORS is not a postive integer.';
+						abort abend;
+					end;
+				end;
+				else if substr(comparator,1,7)='numeric' then do;
+					threshold=substr(comparator,8,(length(comparator)-7));
+					comparator='numeric';
+					if threshold<=0 then do;
+						put 'ERROR: One or more of the numeric thresholds in LINKING_VARIABLE_COMPARATORS is not greater than zero.';
+						abort abend;
+					end;
+				end;
+				else if substr(comparator,1,7)='winkler' then do;
+					threshold=substr(comparator,8,(length(comparator)-7));
+					comparator='winkler';
+					if threshold<=0 or threshold>=1 then do;
+						put 'ERROR: One or more of the winkler thresholds in LINKING_VARIABLE_COMPARATORS is not between 0 and 1.';
+						abort abend;
+					end;
+				end;
+			end;
+			if length(comparator)>=11 then do;
+				if substr(comparator,1,11)='levenshtein' then do;
+					threshold=substr(comparator,12,(length(comparator)-11));
+					comparator='levenshtein';
+					if threshold-int(threshold)^=0 or threshold<=0 then do;
+						put 'ERROR: One or more of the levenshtein thresholds in LINKING_VARIABLE_COMPARATORS is not a postive integer.';
+						abort abend;
+					end;
+				end;
+			end;
+			if comparator not in ('exact','numeric','missing','winkler','damerau','levenshtein') then do;
+				put 'ERROR: Invalid comparator specified in LINKING_VARIABLE_COMPARATORS, comparator = ' comparator;
+				abort abend;
+			end;
+			output;
+		%end;
+	run;
+	/* Non integer in VARIABLE_LENGTHS. */
+	%if %sysfunc(findc(&var_lengths,"qwertyuiop[]\asdfghjkl;zxcvbnm,./!@#$%^&*()_+<>?{}|"))>0 %then %do;
+		%put ERROR: Non integer value(s) specified in VARIABLE_LENGTHS;
+		%abort abend;
+	%end;
+	/* Unspecified comparisons in PASSES=. */
+	%if %length(&keys)>0 and %eval(%sysfunc(count(&keys,%str(.txt))))=0 %then %do;
+		%let no_passes=%sysfunc(countw(&keys,"+"));
+		data passes;
+			length component $15.;
+			%do i=1 %to &no_passes;
+				%let current_pass=%sysfunc(scan(&keys,&i,"+"));
+				no_vars=countw("&current_pass",'-','s');
+				do j=1 to no_vars;
+					component=compbl(trim(left(scan("&current_pass",j,'-','s'))));
+					output;
+				end;
+			%end;
+		run;
+	%end;
+	%else %if %length(&keys)>0 %then %do;
+		proc import datafile="&keys" out=passes(rename=(var1=key)) dbms=dlm replace;
+			getnames=no;
+			delimiter='&';
+			guessingrows=10000;
+		run;
+		data passes;
+			set passes;
+			keep component;
+			no_vars=countw(key,'+-','s');
+			do i=1 to no_vars;
+				component=lowcase(compbl(trim(left(scan(key,i,'+-','s')))));
+				output;
+			end;	
+		run;
+	%end;
+	%if %length(&keys)>0 %then %do;
+		proc sort data=passes nodupkey;
+			by component;
+		run;
+		data components;
+			length component $15.;
+			%do i=1 %to &l_variables_to_compare_a;
+				component=compbl(trim(left(scan("&components",&i,'+','s'))));
+				output;
+			%end;
+		run;
+		proc sort data=components nodupkey;
+			by component;
+		run;
+		data compare;
+			merge passes components(in=c);
+			by component;
+			if not c then do;
+				put 'ERROR: ' component 'is not specifed in COMPARISON_NAMES.';
+				abort abend;
+			end;
+		run;
+	%end;
+%mend;
+
+
+
+
+/* Copies &varlist to &newlist and adds suffixes and/or prefixes to each item in the list.  There's also the option of inserting text between 
+each item in the list and/or saving the number of items in the list to &listlength. */
+%macro listchange(varlist,newlist,insert=,prefix=,suffix=,listlength=dummy);
+	%global &newlist &listlength;
+	%let &listlength=%sysfunc(countw(&varlist,' ',s));
+	%do i=1 %to &&&listlength;
+		%let nextvar=%scan(&varlist,&i);
+		%if &suffix=NUMBER %then %do;
+			%if &i=1 %then %let &newlist=&prefix.&nextvar._&i.;
+			%else %let &newlist=&&&newlist &insert &prefix.&nextvar._&i.;
+		%end;
+		%else %do;
+			%if &i=1 %then %let &newlist=&prefix.&nextvar.&suffix.;
+			%else %let &newlist=&&&newlist &insert &prefix.&nextvar.&suffix.;
+		%end;
+	%end;
+	%let &listlength=%eval(&i-1);
+%mend;
+
+
+
+
+/* Read in data, convert variables to character or numeric format. */
+%macro reformat_vl;
+
+	data data_a;
+		set indata_a.&dataset_a;
+		keep &id_a &secondary_id_a &variables_to_compare_a_numbered;
+		%do i=1 %to &no_vars;
+			%let vara=%scan(&variables_to_compare_a,&i);
+			%let vara_numbered=%scan(&variables_to_compare_a_numbered,&i);
+			%let comp=%scan(&comparators,&i,%str( ));
+			%if %length(&var_lengths)=0 %then %let var_length=11;
+			%else %let var_length=%scan(&var_lengths,&i);
+			%if %substr(&comp,1,5)^=numer %then %do;
+				&vara_numbered=trim(left(put(&vara,&var_length..)));
+				if missing(&vara) then &vara_numbered='~'; /* A character field with only spaces is also treated as missing. */
+			%end;
+			%else %do;
+				var_temp=trim(left(put(&vara,7.)));
+				if substr(var_temp,1,1)='@' then var_temp='9999999'; /* Keep NA category to keep pairs that agree on Not Applicable. */
+				if findc(var_temp,'1234567890')=0 or findc(var_temp,'QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm&!#$%^*()<>?/\{}[]|`~_+=,')>0 then var_temp='99991';
+				&vara_numbered=var_temp+0;
+				drop var_temp;
+			%end;
+		%end;
+	run;
+
+	data data_b;
+		set indata_b.&dataset_b;
+		keep &id_b &secondary_id_b &variables_to_compare_b_numbered;
+		%do i=1 %to &no_vars;
+			%let varb=%scan(&variables_to_compare_b,&i);
+			%let varb_numbered=%scan(&variables_to_compare_b_numbered,&i);
+			%let comp=%scan(&comparators,&i,%str( ));
+			%if %length(&var_lengths)=0 %then %let var_length=11;
+			%else %let var_length=%scan(&var_lengths,&i);
+			%if %substr(&comp,1,5)^=numer %then %do;
+				&varb_numbered=trim(left(put(&varb,&var_length..)));
+				if missing(&varb) then &varb_numbered='.'; /* A character field with only spaces is also treated as missing. */
+			%end;
+			%else %do;
+				var_temp=trim(left(put(&varb,7.)));
+				if substr(var_temp,1,1)='@' then var_temp='9999999'; /* Keep NA category to keep pairs that agree on Not Applicable. */
+				if findc(var_temp,'1234567890')=0 or findc(var_temp,'QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm&!#$%^*()<>?/\{}[]|`~_+=,')>0 then var_temp='999920';
+				&varb_numbered=var_temp+0;
+				drop var_temp;
+			%end;
+		%end;
+	run;
+
+%mend reformat_vl;
+
+
+
+
+/* Read in priority variables. */
+%macro dr_priorities_a;
+	%global no_priorities;
+	%let no_priorities=%sysfunc(countw(&priorities,' ',s));
+	%do i=1 %to &no_priorities;
+		%global priority_&i;
+		%let priority_&i=%scan(&priorities,&i);
+	%end;
+%mend dr_priorities_a;
+
+
+
+
+
+/* Read in filter variables. */
+%macro dr_filters_a;
+	%global no_filter_vars;
+	%let no_filter_vars=%sysfunc(countw(&filter_vars,' ',s));
+	%do i=1 %to &no_filter_vars;
+		%global filter_&i;
+		%let filter_&i=%scan(&filter_vars,&i);
+	%end;
+%mend dr_filters_a;
+
+
+
+
+/* Creates macro variables cats1 to cats&no_vars. Variables that use fuzzy matching don't contribute to the number of categories. */
+%macro categories; 
+	%do i=1 %to &no_vars;
+		%global cats&i;
+		%let tempcomp=%scan(&comparators,&i,%str( ));
+		%if %substr(&tempcomp,1,5)^=exact %then %let cats&i=1;
+		%else %do;
+			proc sql;
+				create table distint_cats as
+				select distinct %scan(&variables_to_compare_b_numbered,&i)
+				from data_b(where=(%scan(&variables_to_compare_b_numbered,&i)^='.'));
+			quit;
+			data _null_;
+				set distint_cats end=last;
+				if last then do;
+					no_blocks=_n_;
+					call symput("cats&i",no_blocks);
+				end;
+			run;
+		%end;
+	%end;
+%mend;
+
+
+
+
+/* Setup variables for later searching through variable list to ensure that it skips passes/keys containing multiple variables that shouldn't 
+appear in the same pass/key. */
+%macro groups;
+	%do g=1 %to 9;
+		%global group_&g._length;
+		%let group_&g._length=%sysfunc(countw(&&&group_&g,' ',s));
+		%do i=1 %to &&group_&g._length;
+			%global group_&g._&i;
+			%let group_&g._&i=%scan(&&&group_&g,&i);
+		%end;
+	%end;
+%mend groups;
+
+
+
+
+/* Setup variables for later searching through variable list to ensure that it skips passes/keys that don't contain at least one critical 
+variable. */
+%macro setup_cvs;
+	%do j=1 %to 9;
+		%global no_critical_vars_&j;
+		%let no_critical_vars_&j=%sysfunc(countw(&&&critical_vars_&j,' ',s));
+		%do i=1 %to &&no_critical_vars_&j;
+			%global critical_&j._&i;
+			%let critical_&j._&i=%scan(&&&critical_vars_&j,&i);
+		%end;
+	%end;
+%mend setup_cvs;
+
+
+
+
+/* This macro is used in %join_compare.  For each key that doesn't contain more than one variable from each group, will perform a filtering on 
+the latest linking variable if an sql join was done on a broader set of variables, otherwise will do an sql join if the number of blocks is at 
+least &min_block_no. Comparisons are combined with 'all_agreements' on the outer %do loop of %join_compare.  This has been updated to also 
+exclude passes/keys that don't contain at least one critical variable. */
+%macro join_filter(current_key=,previous_key=,level=);
+	%global tempa&level tempb&level tempcomp&level sql_done&level;
+	%let tempa&level=%scan(&variables_to_compare_a_numbered,&&&i&level);
+	%let tempb&level=%scan(&variables_to_compare_b_numbered,&&&i&level);
+	%let tempcomp&level=%scan(&comparators,&&&i&level,%str( ));
+	%let sql_done&level=0;
+	%let prev_level=%eval(&level-1);
+	data _null_;
+		key="&&&current_key";
+		%do g=1 %to 9;
+			no_times_&g= 
+				%if &&&group_&g._length>0 %then %do i=1 %to &&&group_&g._length;
+					(findw(key,"&&&group_&g._&i",' ','e')>0)+
+				%end;
+				0;
+		%end;
+		%do cvl=1 %to 9;
+			%if &&&no_critical_vars_&cvl>0 %then %do; 
+				contains_cv_&cvl='0';
+				%do cv=1 %to &&&no_critical_vars_&cvl;
+					if findw(key,"&&&critical_&cvl._&cv",' ')>0 then contains_cv_&cvl='1';
+				%end;
+			%end;
+			%else contains_cv_&cvl='1';;
+		%end;
+		if no_times_1>1 or no_times_2>1 or no_times_3>1 or no_times_4>1 or no_times_5>1 or no_times_6>1 or no_times_7>1 or no_times_8>1 or no_times_9>1 or
+			contains_cv_1='0' or contains_cv_2='0' or contains_cv_3='0' or contains_cv_4='0' or contains_cv_5='0' or contains_cv_6='0' or contains_cv_7='0' or contains_cv_8='0' or contains_cv_9='0' then call symput("skip_key",1);
+		else call symput("skip_key",0);
+		output;
+	run;
+	%if &skip_key=0 and &&&sql_done&prev_level=0 %then %do;
+		data _null_;
+			cats=
+			%do lc=1 %to &level;
+				%let pos=i&lc;
+				&&&&cats&&&pos*
+			%end;
+				1;
+			key="&&&current_key";
+			Contains_FV='0';
+			%if &no_filter_vars>0 %then %do fv=1 %to &no_filter_vars;
+				if findw(key,"&&&filter_&fv",' ')>0 then Contains_FV='1';
+			%end;
+			if cats>=&min_block_no and Contains_FV='0' then call symput("sql_do",1);
+			else call symput("sql_do",0);
+		run;
+		%if &sql_do=1 %then %do;
+			proc sql;
+				create table agrdata.a_&current_key as
+				select *, "&&&current_key" as key 
+			    from data_a, data_b
+			    where %do h=1 %to &level;
+							%if %substr(&&&tempcomp&h,1,5)=exact %then &&&tempa&h=&&&tempb&h;
+							%else %if %substr(&&&tempcomp&h,1,7)=winkler %then %do;
+								%let threshold=%substr(&&&tempcomp&h,8,(%length(&&&tempcomp&h)-7));
+								winkler(&&&tempa&h,&&&tempb&h,0.1)>=&threshold
+							%end;
+							%else %if %substr(&&&tempcomp&h,1,7)=levensh %then %do;
+								%let threshold=%substr(&&&tempcomp&h,12,(%length(&&&tempcomp&h)-11));
+								%let lev_cutoff=%eval(&threshold+1);
+								complev(&&&tempa&h,&&&tempb&h,&lev_cutoff)<=&threshold and &&&tempa&h^='~' and &&&tempb&h^='.'
+							%end;
+							%else %if %substr(&&&tempcomp&h,1,7)=damerau %then %do;
+								%let threshold=%substr(&&&tempcomp&h,8,(%length(&&&tempcomp&h)-7));
+								damerau(&&&tempa&h,&&&tempb&h)<=&threshold and &&&tempa&h^='~' and &&&tempb&h^='.'
+							%end;
+							%else %if %substr(&&&tempcomp&h,1,7)=numeric %then %do;
+								%let threshold=%substr(&&&tempcomp&h,8,(%length(&&&tempcomp&h)-7));
+								abs(&&&tempa&h-&&&tempb&h)<=&threshold
+							%end;
+%else %if %substr(&&&tempcomp&h,1,7)=missing %then %do; (&&&tempa&h='~' or &&&tempb&h='.' %if %length(&m_probs)>0 and %length(&u_probs)>0 %then %do; or &&&tempa&h=&&&tempb&h %end;) %end;
+/*%else %if %substr(&&&tempcomp&h,1,7)=missing %then %do; (&&&tempa&h='~' or &&&tempb&h='.') %end;*/
+							and
+						%end;
+						1=1;
+			quit;
+			proc sql;
+   				insert into key_file_dedup
+      			set key="&&&current_key";
+			quit;
+			run;
+			%let sql_done&level=1;
+			%let members_in_library=1;
+		%end;
+	%end;
+	%else %if &skip_key=0 and &level>1 %then %do;
+		%let sql_done&level=1;
+		data agrdata.a_&current_key;
+			length key $100.;
+			set agrdata.a_&previous_key;
+			key="&&&current_key";
+			where 
+				%if %substr(&&&tempcomp&level,1,5)=exact %then &&&tempa&level=&&&tempb&level;
+				%else %if %substr(&&&tempcomp&level,1,7)=winkler %then %do;
+					%let threshold=%substr(&&&tempcomp&level,8,(%length(&&&tempcomp&level)-7));
+					winkler(&&&tempa&level,&&&tempb&level,0.1)>=&threshold
+				%end;
+				%else %if %substr(&&&tempcomp&level,1,7)=levensh %then %do;
+					%let threshold=%substr(&&&tempcomp&level,12,(%length(&&&tempcomp&level)-11));
+					%let lev_cutoff=%eval(&threshold+1);
+					complev(&&&tempa&level,&&&tempb&level,&lev_cutoff)<=&threshold and &&&tempa&level^='~' and &&&tempb&level^='.'
+				%end;
+				%else %if %substr(&&&tempcomp&level,1,7)=damerau %then %do;
+					%let threshold=%substr(&&&tempcomp&level,8,(%length(&&&tempcomp&level)-7));
+					damerau(&&&tempa&level,&&&tempb&level)<=&threshold and &&&tempa&level^='~' and &&&tempb&level^='.'
+				%end;
+				%else %if %substr(&&&tempcomp&level,1,7)=numeric %then %do;
+					%let threshold=%substr(&&&tempcomp&level,8,(%length(&&&tempcomp&level)-7));
+					abs(&&&tempa&level-&&&tempb&level)<=&threshold
+				%end;
+%else %if %substr(&&&tempcomp&level,1,7)=missing %then %do; &&&tempa&level='~' or &&&tempb&level='.' %if %length(&m_probs)>0 and %length(&u_probs)>0 %then %do; or &&&tempa&level=&&&tempb&level %end; %end;
+/*%else %if %substr(&&&tempcomp&level,1,7)=missing %then %do; &&&tempa&level='~' or &&&tempb&level='.' %end;*/
+			;
+		run;
+		proc sql;
+   			insert into key_file_dedup
+      		set key="&&&current_key";
+		quit;
+		run;
+	%end;
+%mend join_filter;
+
+
+
+
+/* Runs %join_filter for each combination of linking variables. */
+%macro join_compare;
+	data all_agreements_dups key_file_dedup;
+		length key $100.; 
+	run;
+	%if %length(&min_block_no)=0 %then %let min_block_no=10000000;
+	%do i1=1 %to &no_vars;
+		%let members_in_library=0;
+		%let sql_done0=0;
+		%global k_&i1;
+		%let k_&i1=%scan(&components,&i1);
+		%join_filter(current_key=k_&i1,previous_key=0,level=1);
+		%if &no_vars>=2 %then %do i2=&i1 %to &no_vars;
+			%if &i2^=&i1 %then %do;
+				%global k_&i1._&i2;
+				%let k_&i1._&i2=&&&k_&i1 %scan(&components,&i2);
+				%join_filter(current_key=k_&i1._&i2,previous_key=k_&i1,level=2);
+				%if &no_vars>=3 %then %do i3=&i2 %to &no_vars;
+					%if &i3^=&i2 %then %do;
+						%global k_&i1._&i2._&i3;
+						%let k_&i1._&i2._&i3=&&&k_&i1._&i2 %scan(&components,&i3);
+						%join_filter(current_key=k_&i1._&i2._&i3,previous_key=k_&i1._&i2,level=3);
+						%if &no_vars>=4 %then %do i4=&i3 %to &no_vars;
+							%if &i4^=&i3 %then %do;
+								%global k_&i1._&i2._&i3._&i4;
+								%let k_&i1._&i2._&i3._&i4=&&&k_&i1._&i2._&i3 %scan(&components,&i4);
+								%join_filter(current_key=k_&i1._&i2._&i3._&i4,previous_key=k_&i1._&i2._&i3,level=4);
+								%if &no_vars>=5 %then %do i5=&i4 %to &no_vars;
+									%if &i5^=&i4 %then %do;
+										%global k_&i1._&i2._&i3._&i4._&i5;
+										%let k_&i1._&i2._&i3._&i4._&i5=&&&k_&i1._&i2._&i3._&i4 %scan(&components,&i5);
+										%join_filter(current_key=k_&i1._&i2._&i3._&i4._&i5,previous_key=k_&i1._&i2._&i3._&i4,level=5);
+										%if &no_vars>=6 %then %do i6=&i5 %to &no_vars;
+											%if &i6^=&i5 %then %do;
+												%global k_&i1._&i2._&i3._&i4._&i5._&i6;
+												%let k_&i1._&i2._&i3._&i4._&i5._&i6=&&&k_&i1._&i2._&i3._&i4._&i5 %scan(&components,&i6);
+												%join_filter(current_key=k_&i1._&i2._&i3._&i4._&i5._&i6,previous_key=k_&i1._&i2._&i3._&i4._&i5,level=6);
+												%if &no_vars>=7 %then %do i7=&i6 %to &no_vars;
+													%if &i7^=&i6 %then %do;
+														%global k_&i1._&i2._&i3._&i4._&i5._&i6._&i7;
+														%let k_&i1._&i2._&i3._&i4._&i5._&i6._&i7=&&&k_&i1._&i2._&i3._&i4._&i5._&i6 %scan(&components,&i7);
+														%join_filter(current_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7,previous_key=k_&i1._&i2._&i3._&i4._&i5._&i6,level=7);
+														%if &no_vars>=8 %then %do i8=&i7 %to &no_vars;
+															%if &i8^=&i7 %then %do;
+																%global k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8;
+																%let k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8=&&&k_&i1._&i2._&i3._&i4._&i5._&i6._&i7 %scan(&components,&i8);
+																%join_filter(current_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8,previous_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7,level=8);
+																%if &no_vars>=9 %then %do i9=&i8 %to &no_vars;
+																	%if &i9^=&i8 %then %do;
+																		%global k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9;
+																		%let k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9=&&&k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8 %scan(&components,&i9);
+																		%join_filter(current_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9,previous_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8,level=9);
+																		%if &no_vars>=10 %then %do i10=&i9 %to &no_vars;
+																			%if &i10^=&i9 %then %do;
+																				%global k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9._&i10;
+																				%let k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9._&i10=&&&k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9 %scan(&components,&i10);
+																				%join_filter(current_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9._&i10,previous_key=k_&i1._&i2._&i3._&i4._&i5._&i6._&i7._&i8._&i9,level=10);
+																			%end;
+																		%end;
+																	%end;
+																%end;
+															%end;
+														%end;
+													%end;
+												%end;
+											%end;
+										%end;
+									%end;
+								%end;
+							%end;
+						%end;
+					%end;
+				%end;
+			%end;
+		%end;
+		%if &members_in_library=1 %then %do;
+			data all_agreements_dups;
+				set all_agreements_dups(%if &i1=1 %then where=(not missing(key));) 
+					agrdata.a: (keep=&id_a &id_b &secondary_id_a &secondary_id_b key);
+			run;
+			proc datasets library=agrdata kill;
+			run;
+			quit;
+		%end;
+	%end;
+%mend join_compare;
+
+
+
+
+/* Remove duplicate IDs and calculate file sizes. */
+%macro dedup_ids;
+	%global size_a size_b;
+	proc sort data=all_agreements_dups (keep=key &id_a &id_b) out=all_agreements nodupkey;
+		by key &id_a &id_b;
+	run;
+	proc sort data=data_a out=recs_a nodupkey;
+		by &id_a;
+	run;
+	data _null_;
+		set recs_a end=last;
+		if last then call symput("size_a",_n_);
+	run;
+	proc sort data=data_b out=recs_b nodupkey;
+		by &id_b;
+	run;
+	data _null_;
+		set recs_b end=last;
+		if last then call symput("size_b",_n_);
+	run;
+%mend dedup_ids;
+
+
+
+
+/* Read in manually entered keys from template or text file.  Remove duplicate and blank keys. */
+%macro keylist;
+	%global no_keys;
+	%if %eval(%sysfunc(count(&keys,%str(.txt))))=0 %then %do;
+		%let n_dup_keys=%eval(%sysfunc(count(&keys,%str(+)))+1);
+		data key_file;
+			length key $100.;
+			%do i=1 %to &n_dup_keys;
+				%let tempkey&i=%sysfunc(tranwrd(%scan(&keys,&i,%str(+)),-,%str( )));
+				key="&&&tempkey&i";
+				key_no=&i+0;
+				output;
+			%end;
+		run;
+	%end;
+	%else %do;
+		proc import datafile="&keys" out=key_file(rename=(var1=key)) dbms=dlm replace;
+			getnames=no;
+			delimiter='&';
+			guessingrows=10000;
+		run;
+		data key_file;
+			length key $100.;
+			set key_file;
+			key=lowcase(tranwrd(tranwrd(key,'+',' '),'-',' '));
+			key_no=_n_;
+		run;
+	%end;
+	data key_file;
+		set key_file;
+		key=strip(compbl(key));
+		%do c=1 %to 20;
+			key=tranwrd(key,'  ',' ');
+			key=tranwrd(key,'09'x,' ');
+			if findc(substr(key,1,1),'QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm_')=0 and length(key)>1 then key=substr(key,2,(length(key)-1));
+		%end;
+	run;
+	proc sort data=key_file;
+		by key;
+	run;
+	data key_file_dedup;
+		set key_file;
+		by key;
+		if first.key and findc(key,'QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm')>0 then output;
+	run;
+	proc sort data=key_file_dedup;
+		by key_no;
+	run;
+	data key_file_dedup;
+		set key_file_dedup end=last;
+		drop suffix;
+		suffix=put(_n_,4.);
+		call symput(cats("localkey",suffix),key);
+		key=catx('+',_n_,key);
+		if last then call symput("no_keys",_n_);
+	run;
+	%do i=1 %to &no_keys;
+		%global length_key&i key&i keya&i keyb&i comparators&i end_keya&i end_keyb&i;
+		%let key&i=%sysfunc(compbl(&&localkey&i));
+		%let j=1;
+		%let nextvar_j=%scan(&&key&i,&j,%str( ));
+		%let next_var_is_not_null_j=%length(&nextvar_j);
+		%let keya&i=;
+		%let keyb&i=;
+		%let comparators&i=;
+		%do %while (&next_var_is_not_null_j);
+			%let pos=%sysfunc(findw(&components,&nextvar_j,' ',e));
+			%let keya&i=&&keya&i %scan(&variables_to_compare_a_numbered,&pos);
+			%let keyb&i=&&keyb&i %scan(&variables_to_compare_b_numbered,&pos);
+			%let comparators&i=&&comparators&i %scan(&comparators,&pos,%str( ));
+			%let end_keya&i=%scan(&variables_to_compare_a_numbered,&pos);
+			%let end_keyb&i=%scan(&variables_to_compare_b_numbered,&pos);
+			%let j=%eval(&j+1);
+			%let nextvar_j=%scan(&&key&i,&j,%str( ));
+			%let next_var_is_not_null_j=%length(&nextvar_j);
+		%end;
+		%let length_key&i=%eval(&j-1);
+	%end;
+%mend keylist;
+
+
+
+
+/* Do SQL join for each manually entered key. */
+%macro sql_joins;
+	%do i=1 %to &no_keys;
+		proc sql;
+			create table agrdata.agreements&i as
+			select %sysfunc(tranwrd(&&keya&i,%str( ),%str(,)))
+					,%sysfunc(tranwrd(&&keyb&i,%str( ),%str(,)))
+					,&id_a
+					,&id_b
+					%if %length(&secondary_id_a) > 0 %then ,&secondary_id_a;
+					%if %length(&secondary_id_b) > 0 %then ,&secondary_id_b;
+					,"&i.+&&&key&i" as key
+		    from data_a, data_b
+		    where %do j=1 %to &&length_key&i;
+					%let tempcomp=%scan(&&comparators&i,&j,%str( ));
+					%let tempa=%scan(&&keya&i,&j);
+					%let tempb=%scan(&&keyb&i,&j);
+					%if %substr(&tempcomp,1,5)=exact %then &tempa=&tempb and;
+					%else %if %substr(&tempcomp,1,7)=winkler %then %do;
+						%let threshold=%substr(&tempcomp,8,(%length(&tempcomp)-7));
+						winkler(&tempa,&tempb,0.1)>=&threshold and
+					%end;
+					%else %if %substr(&tempcomp,1,7)=levensh %then %do;
+						%let threshold=%substr(&tempcomp,12,(%length(&tempcomp)-11));
+						%let lev_cutoff=%eval(&threshold+1);
+						complev(&tempa,&tempb,&lev_cutoff)<=&threshold and &tempa^='~' and &tempb^='.' and
+					%end;
+					%else %if %substr(&tempcomp,1,7)=damerau %then %do;
+						%let threshold=%substr(&tempcomp,8,(%length(&tempcomp)-7));
+						damerau(&tempa,&tempb)<=&threshold and &tempa^='~' and &tempb^='.' and
+					%end;
+					%else %if %substr(&tempcomp,1,7)=numeric %then %do;
+						%let threshold=%substr(&tempcomp,8,(%length(&tempcomp)-7));
+						abs(&tempa-&tempb)<=&threshold and
+					%end;
+					%else %if %substr(&tempcomp,1,7)=missing %then %do; (&tempa='~' or &tempb='.' %if %length(&m_probs)>0 and %length(&u_probs)>0 %then %do; or &tempa=&tempb %end;) and %end;
+					/*%else %if %substr(&tempcomp,1,7)=missing %then %do; (&tempa='~' or &tempb='.') and %end;*/
+				  %end;
+				  1=1;
+		quit;
+	%end;
+	data all_agreements_dups;
+		length key $100.;
+		set agrdata.a: (keep=&id_a &id_b &secondary_id_a &secondary_id_b key);
+	run;
+	proc datasets library=agrdata kill;
+	run;
+	quit;
+%mend sql_joins;
+
+
+
+
+/* Amended duplicate rate to correpond with the marginal uniqueness rate.  This duplicate rate is the number of records on &dataset_a that agree with more than one 
+record on &dataset_b or shares a &dataset_b record with another &dataset_a record divided by the number of records on &dataset_a that agree with at least one 
+record on &dataset_b.  Denominator now includes all pairs, previously it was just all records on File A. */
+%macro duplicate_rate_calculator_3;	
+	proc sort data=all_agreements;
+		by key &id_b;
+	run;
+	data all_agreements_dr_1;
+		set all_agreements;
+		by key &id_b;
+		if first.&id_b and last.&id_b then linksb1='1';
+	run;
+	proc sort data=all_agreements_dr_1;
+		by key &id_a;
+	run;
+	data all_agreements_dr_1;
+		format duplicate_rate best8.;
+		set all_agreements_dr_1;
+		by key &id_a;
+		retain linkcount links1 links_multiple 0;
+		if first.key then do;
+			linkcount=0;
+			links1=0;
+			links_multiple=0;
+		end;
+		if first.&id_a and last.&id_a and linksb1='1' then links1+1;
+		else /*if last.&id_a then */ links_multiple+1;
+		if last.key then duplicate_rate=links_multiple/(links1+links_multiple);
+	run;
+	proc sort data=all_agreements_dr_1;
+		by key descending &id_a descending duplicate_rate;
+	run;
+	data all_agreements_dr_1;
+		set all_agreements_dr_1;
+		by key;
+		keep key duplicate_rate &id_a &id_b;
+		retain carry_duplicate_rate;
+		if first.key then carry_duplicate_rate=duplicate_rate;
+		else duplicate_rate=carry_duplicate_rate;
+		if missing(key) then delete;
+	run;
+	/* If using auto pass mode, ensure different duplicate rates for each pass for running of %marginal_uniqueness_rate. Otherwise if passes 
+	are	manually entered, %dr_penalty will adjust the duplicate rates. */
+	%if %length(&keys)=0 %then %do;
+		proc sort data=all_agreements_dr_1;
+			by duplicate_rate key;
+		run;
+		data all_agreements_dr_1;
+			set all_agreements_dr_1;
+			drop carry_duplicate_rate;
+			by duplicate_rate key;
+			retain carry_duplicate_rate 0;
+			if first.key then do;
+				if duplicate_rate<=carry_duplicate_rate then duplicate_rate=carry_duplicate_rate+0.000000000001;
+				carry_duplicate_rate=duplicate_rate;
+			end;
+			else duplicate_rate=carry_duplicate_rate;
+		run;
+	%end;
+%mend;
+
+
+
+
+/* Force passes to be run in manually entered order by penalising duplicate rate by key postition. */
+%macro dr_penalty;
+	data all_agreements_dr_1;
+		set all_agreements_dr_1;
+		drop key_no;
+		key_no=input(scan(key,1,'+'),best8.);
+		%if &sort_by=passes %then duplicate_rate=duplicate_rate+key_no;
+		%else duplicate_rate=duplicate_rate+key_no*0.000000000001;;
+	run;
+%mend dr_penalty;
+
+
+
+
+/* Adjust duplicate rates if there are filter variables and not sorting by passes. */
+%macro dr_filters_b;
+	/* Extract duplicate rates for each key. */
+	proc sort data=all_agreements_dr_1(keep=duplicate_rate key) out=all_agreements_dr_1c;
+		by key;
+	run;
+	data key_rate_filter;
+		set all_agreements_dr_1c;
+		rename duplicate_rate=old_duplicate_rate;
+		by key;
+		if first.key then do;
+			rem_key=scan(key,-1,'+');
+			Contains_FV='0';
+			%do fv=1 %to &no_filter_vars;
+				if findw(rem_key,"&&&filter_&fv",'+','s')>0 then Contains_FV='1';
+				rem_key=trim(left(tranwrd(cat(' ',rem_key,' ')," &&&filter_&fv ",' ')));	
+			%end;
+			output;
+		end;
+	run;
+	proc sort data=key_rate_filter;
+		by rem_key Contains_FV descending old_duplicate_rate;
+	run;
+	data outdata.ur_filters_&output_flag(rename=(key=Pass rem_key=Core_Linking_Variables)) ur_filters_&output_flag;
+		set key_rate_filter;
+		by rem_key;
+		retain new_duplicate_rate Filtering;
+		if first.rem_key then do;
+			new_duplicate_rate=old_duplicate_rate;
+			if Contains_FV='0' then Filtering='Yes';
+			else Filtering='No'; /* In manual pass mode, passes without non filtering counterparts are kept and assigned the old duplicate rate. */
+		end;
+		else if Filtering='Yes' then new_duplicate_rate=new_duplicate_rate-0.0000000001;
+		else new_duplicate_rate=old_duplicate_rate;
+	run;
+	/* Add new duplicate rates to all_agreements. */
+	proc sql;
+		create table all_agreements_dr_1_new as
+		select *
+		from all_agreements_dr_1(drop=duplicate_rate) as a, ur_filters_&output_flag(keep=key new_duplicate_rate rename=(new_duplicate_rate=duplicate_rate)) as b
+		where a.key=b.key;
+	quit;
+	run;
+	data all_agreements_dr_1;
+		set all_agreements_dr_1_new;
+	run;
+%mend dr_filters_b;
+
+
+
+
+/* Adjust duplicate rates if there are priority variables and not sorting by passes. */
+%macro dr_priorities_b;
+	/* Extract duplicate rates for each key. */
+	proc sort data=all_agreements_dr_1(keep=duplicate_rate key) out=all_agreements_dr_1c;
+		by key;
+	run;
+	data key_rate;
+		set all_agreements_dr_1c;
+		by key;
+		if first.key then output;
+	run;
+	/* Determine original ranks. */
+	proc sort data=key_rate;
+		by duplicate_rate;
+	run;
+	data key_rate_2;
+		set key_rate;
+		Old_Rank=_n_;
+	run;
+	/* Adjust duplicate rates. */
+	/* This datastep looks for use of priority linking variables used in each pass */
+	data key_rate_2;
+		set key_rate_2;
+		rem_key_0=scan(key,-1,'+');
+		length Key_Index $&no_priorities..;
+		%do j=1 %to &no_priorities;
+			%let jmin1=%eval(&j-1);
+			if findw(rem_key_&jmin1,"&&&priority_&j",'+','s')>0 then do;
+				sub_key_&j="&&&priority_&j";
+				rem_key_&j=trim(left(tranwrd(cat(' ',rem_key_&jmin1,' ')," &&&priority_&j ",' ')));
+				alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+				letter=substr(alphabet,&j,1);
+				Key_Index=cats(Key_Index,letter);
+			end;
+			else rem_key_&j=rem_key_&jmin1;
+		%end;
+		Key_Index=cats(Key_Index,'ZZZZZZZZZZZZZZZZZZZZZZZZZZ');
+		rem_key_&no_priorities=trim(left(rem_key_&no_priorities));
+	run;
+	proc sort data=key_rate_2;
+		by rem_key_&no_priorities Key_Index;
+	run;
+	data key_rate_2 drs_for_join(keep=new_duplicate_rate key rename=(new_duplicate_rate=duplicate_rate));
+		set key_rate_2;
+		by rem_key_&no_priorities Key_Index;
+		retain new_duplicate_rate;
+		if first.rem_key_&no_priorities then new_duplicate_rate=duplicate_rate;
+		else do;
+			if duplicate_rate<=new_duplicate_rate then new_duplicate_rate=new_duplicate_rate+0.00000001;
+			else new_duplicate_rate=duplicate_rate;
+		end;
+		if new_duplicate_rate>=1 then new_duplicate_rate=0.999999999; /* NH14/10 */
+		duplicate_rate_change=new_duplicate_rate-duplicate_rate;
+	run;
+	/* Determine new ranks and output rank changes. */
+	proc sort data=key_rate_2;
+		by new_duplicate_rate;
+	run;
+	data key_rate_2;
+		set key_rate_2;
+		New_Rank=_n_;
+		Rank_Change=New_Rank-Old_Rank;
+	run;
+	proc sort data=key_rate_2 
+		 out=outdata.ur_priorities_&output_flag(keep=rem_key_&no_priorities key duplicate_rate new_duplicate_rate duplicate_rate_change Old_Rank New_Rank Rank_Change Key_Index 
+												rename=(duplicate_rate=original_duplicate_rate key=Pass rem_key_&no_priorities=Core_Linking_Variables));
+	     by rem_key_&no_priorities Key_Index;
+	run;
+	/* Add new duplicate rates to all_agreements. */
+	proc sql;
+		create table all_agreements_dr_1_new as
+		select *
+		from all_agreements_dr_1(drop=duplicate_rate) as a, drs_for_join as b
+		where a.key=b.key;
+	quit;
+	run;
+	data all_agreements_dr_1;
+		set all_agreements_dr_1_new;
+	run;
+%mend dr_priorities_b;
+
+
+
+
+/* Use James Chipperfield's formula for estimating the proportion of true/false links in each pass. Apply frequency based weights adjustment
+if requested. */
+%macro prob_false_f;
+	%if %length(&prop_matches)=0 or not (&prop_matches>0 or &prop_matches<=1) %then %let prop_matches=1;
+	/* Read in m and u probabilities. */
+	%do i=1 %to &no_vars;
+		%global m_agr_&i u_agr_&i;
+		%let m_agr_&i=%scan(&m_probs,&i,$,s);
+		%let u_agr_&i=%scan(&u_probs,&i,$,s);
+	%end;
+	/* Calculate frequency based m and u probabilities where required. */
+	%let frequency_based_weights=0;
+	%do i=1 %to &no_vars;
+		%if %sysfunc(findc(&&&u_agr_&i,'fF'))>0 %then %do;
+			%let frequency_based_weights=1;
+			%let varname_a_&i=%scan(&variables_to_compare_a_numbered,&i); /* varname_a needs &i because it is used in links_1_pre_f. */
+			%let varname_b=%scan(&variables_to_compare_b_numbered,&i);
+			proc sql;
+				create table freqs_a(where=(&&&varname_a_&i^='~')) as
+				select count(&&&varname_a_&i) as no_&&&varname_a_&i, &&&varname_a_&i
+				from data_a
+				group by &&&varname_a_&i
+				order by &&&varname_a_&i;
+			quit;
+			/* Adjust m probabilities using percentage on freq_a (of non missing cats) * input m. */
+			data adj_mprobs;
+				set freqs_a end=last;
+				total_freq_a+no_&&&varname_a_&i;
+				if last then call symput("total_freq_a",total_freq_a);
+			run;
+			data adj_mprobs;
+				set adj_mprobs;
+				proportion=no_&&&varname_a_&i/&total_freq_a;
+				mprob_f=&&&m_agr_&i*proportion;
+			run;
+			/* Calculate u probs. */
+			proc sql;
+				create table freqs_b(where=(&varname_b^='.')) as
+				select count(&varname_b) as no_&varname_b, &varname_b
+				from data_b
+				group by &varname_b;
+			quit;
+			proc sql;
+				create table crossfreqs as
+				select *
+				from freqs_a as a, freqs_b as b
+				where a.&&&varname_a_&i=b.&varname_b
+				order by &&&varname_a_&i;
+			quit;
+			data _null;
+				set crossfreqs end=last;
+				if last then call symput("no_values_f&i",_n_);
+			run;
+			data crossfreqs_mu;
+				merge crossfreqs(in=b) adj_mprobs(keep=&&&varname_a_&i mprob_f);
+				by &&&varname_a_&i;
+				if b then do;
+					uprob_f=(no_&&&varname_a_&i*no_&varname_b-mprob_f*&size_a)/(&size_a*&size_b-&size_a); 
+					if uprob_f<=0 then uprob_f=0.00000000001;
+					rownumber+1;
+					%do val=1 %to &&&no_values_f&i;
+						if rownumber=&val then do;
+							call symput("m_prob_&i._&val",mprob_f);
+							call symput("u_prob_&i._&val",uprob_f);
+							call symput("u_val_&i._&val",&&&varname_a_&i);
+						end;
+					%end;
+				end;
+			run;
+		%end;
+	%end;
+	/* Simple calculation of link accuracy for passes that don't use frequency based weights. */
+	proc sql;
+		create table keys_probs_nf as
+		select distinct(key)
+		from all_agreements_dr_1(keep=key where=(key^=''));
+	quit;
+	run;
+	data keys_probs_nf;
+		set keys_probs_nf;
+		%do i=1 %to &no_vars;
+			%let comp_&i=%scan(&components,&i);
+			%if %sysfunc(findc(&&&u_agr_&i,'fF'))=0 %then %do;
+				if findw(key,"&&&comp_&i",'+','s')>0 then do;
+					ma_&i=&&&m_agr_&i;
+					ua_&i=&&&u_agr_&i;
+				end;
+				else do;
+					ma_&i=1;
+					ua_&i=1;
+				end;
+			%end;
+			%else %do;
+				ma_&i=1;
+				ua_&i=1;
+				if findw(key,"&&&comp_&i",'+','s')>0 then delete;
+			%end;
+		%end;
+		/* Apply link accuracy formula. */
+		bigw=%do i=1 %to &no_vars; ma_&i* %end; 1;
+		bigr=%do i=1 %to &no_vars; ua_&i* %end; 1;
+		bigt=&prop_matches*(1-bigw)*(&size_b-1)*bigr*((1-bigr)**(&size_b-2)) + (1-&prop_matches)*&size_b*bigr*(1-bigr)**(&size_b-1);
+		bigu=&prop_matches*bigw*(1-bigr)**(&size_b-1);
+		First_Pass_Precision=bigu/(bigt+bigu);
+		prob_false_1p=1-First_Pass_Precision;
+		if missing(prob_false_1p) then prob_false_1p=0.9999;
+	run;
+	/* Estimate value specific link accuracy for passes that use frequency based weights. */
+	%if &frequency_based_weights=1 %then %do;
+		proc sort data=links_1_pre;
+			by &id_a;
+		run;	
+		proc sort data=data_a;
+			by &id_a;
+		run;
+		data links_1_pre_f;
+			merge links_1_pre(in=a) data_a(keep=&id_a %do i=1 %to &no_vars; %if %sysfunc(findc(&&&u_agr_&i,'fF'))>0 %then %scan(&variables_to_compare_a_numbered,&i); %end;);
+			by &id_a;
+			if a and (%do i=1 %to &no_vars; %if %sysfunc(findc(&&&u_agr_&i,'fF'))>0 %then findw(key,"%scan(&components,&i)",'+','s')>0 or; %end;1=2) then do;
+				/* Get frequency based m and u probabilities. */
+				key_new=key;
+				%do i=1 %to &no_vars;
+					%if %sysfunc(findc(&&&u_agr_&i,'fF'))>0 %then %do;
+						if findw(key,"%scan(&components,&i)",'+','s')=0 then do;
+							ma_&i=1;
+							ma_ntm_&i=1;
+							ua_&i=1;
+						end;
+						else do;
+							%do val=1 %to &&&no_values_f&i;
+								if &&&varname_a_&i="&&&u_val_&i._&val" then do;
+									ma_&i=&&&m_prob_&i._&val;
+									ma_ntm_&i=&&&m_agr_&i; /* m prob to apply for 'not the match'. */
+									ua_&i=&&&u_prob_&i._&val;
+									key_new=trim(left(tranwrd(cat(' ',key_new,' ')," %scan(&components,&i) ",cat(' ',catx("_","%scan(&components,&i)","&&&u_val_&i._&val"),' '))));
+								end;
+							%end;
+						end;
+					%end;
+				%end;
+				/* Get non frequency based m and u probabilities. */				
+				%do i=1 %to &no_vars;
+					%let comp_&i=%scan(&components,&i);
+					%if %sysfunc(findc(&&&u_agr_&i,'fF'))=0 %then %do;
+						if findw(key,"&&&comp_&i",'+','s')>0 then do;
+							ma_&i=&&&m_agr_&i;
+							ma_ntm_&i=&&&m_agr_&i; /* m prob to apply for 'not the match', same for non frequency based weights. */
+							ua_&i=&&&u_agr_&i;
+						end;
+						else do;
+							ma_&i=1;
+							ma_ntm_&i=1; /* m prob to apply for 'not the match', same for non frequency based weights. */
+							ua_&i=1;
+						end;
+					%end;
+				%end;
+				/* Apply link accuracy formula. */
+				bigw=%do i=1 %to &no_vars; ma_&i* %end; 1;
+				bigw_ntm=%do i=1 %to &no_vars; ma_ntm_&i* %end; 1;
+				bigr=%do i=1 %to &no_vars; ua_&i* %end; 1;
+				bigt=&prop_matches*(1-bigw_ntm)*(&size_b-1)*bigr*((1-bigr)**(&size_b-2)) + (1-&prop_matches)*&size_b*bigr*(1-bigr)**(&size_b-1);
+				bigu=&prop_matches*bigw*(1-bigr)**(&size_b-1);
+				First_Pass_Precision=bigu/(bigt+bigu);
+				prob_false_1p=1-First_Pass_Precision;
+				if missing(prob_false_1p) then prob_false_1p=0.9999;
+				output links_1_pre_f;
+			end;
+		run;
+		/* Smooth out to pass level and combine frequency based and non frequency based passes. */
+		proc summary data=links_1_pre_f nway;
+			var prob_false_1p First_Pass_Precision;
+			class key;
+			output out=keys_probs_f(drop=_type_) mean=;
+		run;
+		data keys_probs;
+			set keys_probs_f(drop=_freq_) keys_probs_nf(keep=key prob_false_1p First_Pass_Precision);
+		run;
+	%end;
+	%else %do;
+		data keys_probs;
+			set keys_probs_nf(keep=key prob_false_1p First_Pass_Precision);
+		run;
+	%end;
+%mend prob_false_f;
+
+
+
+
+/* Resolve links using the Unique Best Criteria.  Part A is used if precision estimates are requested.  Part A determines unique
+agreements in each pass if run independently, to be input to %prob_false for estimating First Pass Precision.  Part B is used if precision 
+estimates are requested and passes are to be ranked by precision estimates.  Part B adds prob_false (1 - First Pass Precision) to the 
+links_1_pre and all_agreements in this case.  Part C resolve links using the Unique Best Criteria and assumes that all passes have 
+different duplicate rates (or different values of prob_false_1p if that is used for ranking). */
+%macro resolve_links_a(quality_measure);
+	/* Identify records on Dataset A that agree with only one record on Dataset B within each pass. */
+	proc sort data=%if &quality_measure=prob_false_1p %then all_agreements; %else all_agreements_dr_1; out=all_agreements_dr_1;
+		by key &id_a;
+	run;
+	data all_agreements_dr_1;
+		set all_agreements_dr_1;
+		by key &id_a;
+		if first.&id_a and last.&id_a then unique_a='1';
+	run;
+	/* Identify records on Dataset B that agree with only one record on Dataset A within each pass and keep links that are unique both times. */
+	proc sort data=all_agreements_dr_1;
+		by key &id_b;
+	run;
+	data links_1_pre non_unique;
+		set all_agreements_dr_1;
+		by key &id_b;
+		drop unique_a unique_b;
+		if first.&id_b and last.&id_b then unique_b='1';
+		if unique_a='1' and unique_b='1' then output links_1_pre;
+		else output non_unique;
+	run;
+%mend resolve_links_a;
+
+%macro resolve_links_b(quality_measure);
+	/* If resolving by prob_false, add false link probabilities to links_1_pre and all_agreements_dr_1. */
+	%if &quality_measure=prob_false_1p %then %do;
+		proc sort data=links_1_pre;
+			by key;
+		run;
+		proc sort data=keys_probs;
+			by key;
+		run;
+		data keys_probs; /* Increases chance that every pass has a different prob_false_1p. */
+			set keys_probs;
+			prob_false_1p=prob_false_1p+_n_*0.000000000001;
+			if prob_false_1p>1 then prob_false_1p=1;
+		run;
+		data links_1_pre;
+			merge links_1_pre(in=a) keys_probs(keep=key prob_false_1p in=b);
+			by key;
+			if a and b and not missing(key);
+		run;
+		proc sort data=all_agreements_dr_1;
+			by key;
+		run;
+		data all_agreements_dr_1;
+			merge all_agreements_dr_1(in=a) keys_probs(keep=key prob_false_1p in=b);
+			by key;
+			if a and b and not missing(key);
+		run;
+	%end;
+%mend resolve_links_b;
+
+%macro resolve_links_c(quality_measure);
+	/* Identify records on Dataset A that agree with only one record on Dataset B within each pass. */
+	proc sort data=all_agreements_dr_1;
+		by &id_a &quality_measure;
+	run;
+	data all_agreements_dr_1 best_agreement_ida(keep=&id_a &id_b &quality_measure key rename=(key=Pass));
+		set all_agreements_dr_1(keep=&id_a &id_b &quality_measure key);
+		by &id_a &quality_measure;
+		if first.&id_a then do;
+			output best_agreement_ida;
+			if first.&quality_measure and last.&quality_measure then unique_a='1';
+		end;
+		output all_agreements_dr_1;
+	run;
+	/* Identify records on Dataset B that agree with only one record on Dataset A within each pass
+   and keep links that are unique both times. */
+	proc sort data=all_agreements_dr_1;
+		by &id_b &quality_measure;
+	run;
+	data outdata.links_&output_flag(drop=unique_a unique_b) best_agreement_idb(keep=&id_a &id_b &quality_measure key rename=(key=Pass));
+		set all_agreements_dr_1;
+		by &id_b &quality_measure;
+		if first.&id_b then do;
+			output best_agreement_idb;
+			if first.&quality_measure and last.&quality_measure then unique_b='1';
+		end;
+		if unique_a='1' and unique_b='1' then output outdata.links_&output_flag;
+	run;
+%mend resolve_links_c;
+
+
+
+
+/* Output tables and sort links dataset. */
+%macro tables_sort(quality_measure);
+	%if &stage=0 %then %do;
+		data outdata.all_agreements_&output_flag;
+			set all_agreements;
+			rename key=Pass;
+		run;
+	%end;
+	proc sort data=outdata.links_&output_flag(rename=(key=Pass));
+		by Pass;
+	run;
+	data key_rate;
+		set outdata.links_&output_flag;
+		by Pass;
+		if first.Pass then output;
+		keep Pass &quality_measure;
+	run;
+	proc sql;
+		create table links_by_key as
+		select Pass, count(Pass) as Marginal_Links
+		from outdata.links_&output_flag
+		group by Pass
+		order by Pass;
+	quit;
+	data outdata.quality_links_&output_flag;
+		merge links_by_key key_rate;
+		by Pass;
+	run;
+	proc sort data=outdata.links_&output_flag;
+		by &quality_measure;
+	run;
+	%if &sort_by=passes and %length(&keys)>0 %then %do;
+		data outdata.links_&output_flag;
+			format Pass $100. Pass_No best8. &quality_measure best8.;
+			set outdata.links_&output_flag;
+			Pass_No=int(&quality_measure);
+			&quality_measure=&quality_measure-Pass_No;
+		run;
+	%end;
+	proc sort data=outdata.quality_links_&output_flag;
+		by &quality_measure;
+	run;
+	data outdata.quality_links_&output_flag;
+		format Pass $100. Pass_No best8. &quality_measure best8.;
+		set outdata.quality_links_&output_flag;
+		Links+Marginal_Links;
+		Link_Rate=Links/&size_a;
+		Pass_No=int(&quality_measure);
+		&quality_measure=&quality_measure-Pass_No;
+		%if &sort_by^=passes or %length(&keys)=0 %then drop Pass_No;;
+	run;
+	proc sql;
+		create table outdata.agreements_&output_flag as
+		select Pass, count(Pass) as no_agreements %if &quality_measure=duplicate_rate %then , &quality_measure;
+		from all_agreements_dr_1(rename=(key=Pass))
+		where not missing(Pass)
+		group by Pass %if &quality_measure=duplicate_rate %then , &quality_measure;
+		order by %if &quality_measure=duplicate_rate and (%length(&m_probs)=0 or %length(&u_probs)=0) %then &quality_measure; %else Pass;;
+	quit;
+	%if &sort_by=passes and %length(&keys)>0 %then %do;
+		data outdata.agreements_&output_flag;
+			format Pass $100. Pass_No best8. no_agreements best8. &quality_measure best8.;
+			set outdata.agreements_&output_flag;
+			Pass_No=int(&quality_measure);
+			&quality_measure=&quality_measure-Pass_No;
+		run;
+	%end;
+	%if &quality_measure=prob_false_1p or (%length(&m_probs)>0 and %length(&u_probs)>0) %then %do;
+		proc sort data=keys_probs;
+			by key;
+		run;
+		data outdata.agreements_&output_flag;
+			merge outdata.agreements_&output_flag keys_probs(keep=key First_Pass_Precision rename=(key=Pass));
+			by Pass;
+		run;
+		proc sort data=outdata.agreements_&output_flag;
+			by %if &quality_measure=prob_false_1p %then descending First_Pass_Precision; %else duplicate_rate;;
+		run;
+	%end;
+%mend tables_sort;
+
+
+
+
+/* Adjust link accuracy estimates for order passes are run and output results. */
+%macro accuracy_adjust_output_3;
+	/* Combine passes into groups of 20 or more. */
+	data outdata.quality_links_&output_flag;
+		set outdata.quality_links_&output_flag end=last;
+		retain pass_group group_links;
+		link_pass_no=_n_;
+		if _n_=1 then do;
+			pass_group=1;
+			group_links=0;
+		end;
+		if group_links<20 then group_links=group_links+Marginal_Links;
+		else do;
+			group_links=Marginal_Links;
+			if _n_>1 then pass_group=pass_group+1;
+		end;
+		if last then call symput("no_pass_groups_used",pass_group);
+	run;
+	proc sort data=outdata.quality_links_&output_flag;
+		by Pass;
+	run;
+	proc sort data=links_1_pre;
+		by key;
+	run;
+	%if &sort_by^=precision %then %do; /* Add link accuracy estimates if they're not already on outdata.quality_links_&output_flag. */
+		proc sort data=keys_probs;
+			by key;
+		run;
+		data outdata.quality_links_&output_flag;
+			merge outdata.quality_links_&output_flag(in=a) keys_probs(keep=key prob_false_1p rename=(key=Pass));
+			by Pass;
+			if a;
+		run;
+	%end;
+	/* Add pass_group to the pre resolved unique links file. */
+	data adjust;
+		merge links_1_pre(rename=(key=Pass) in=a keep=key &id_a &id_b) 
+			  outdata.quality_links_&output_flag(keep=Pass Marginal_Links pass_group group_links prob_false_1p in=b);
+		by Pass;
+		drop prob_false_1p;
+		First_Pass_Precision=1-prob_false_1p;
+		assigned_pass_accuracy=0;
+		notlinked=0;
+		if a and b;
+	run;
+	/* Remove duplicates from within pass_groups. */
+	proc sort data=adjust;
+		by pass_group &id_a First_Pass_Precision;
+	run;
+	data adjust;
+		set adjust;
+		by pass_group &id_a;
+		if first.&id_a;
+	run;
+	proc sort data=adjust;
+		by pass_group &id_b First_Pass_Precision;
+	run;
+	data adjust;
+		set adjust;
+		by pass_group &id_b;
+		if first.&id_b;
+	run;
+	/* Adjust link accuracy for each pass_group by adjusting for true links that were made in earlier passes. */
+	proc sort data=adjust;
+		by &id_a &id_b pass_group;
+	run;
+	%do i=1 %to &no_pass_groups_used;
+		data adjust;
+			set adjust(drop=assigned_pass_accuracy notlinked);
+			by &id_a &id_b;
+			retain assigned_pass_accuracy notlinked;
+			if first.&id_b then do;
+				if pass_group=1 then Marginal_Precision=First_Pass_Precision;
+				assigned_pass_accuracy=Marginal_Precision;
+				call missing(notlinked);
+			end;
+			if missing(assigned_pass_accuracy) then do;
+				notlinked=1;
+				assigned_pass_accuracy=0;
+			end;
+		run;
+		proc summary data=adjust(where=(pass_group=%eval(&i+1)));
+			var First_Pass_Precision assigned_pass_accuracy notlinked;
+			id pass_group group_links;
+			output out=acc_%eval(&i+1) sum=unique_true_%eval(&i+1) tl_so_far notlinkedyet;
+		run;
+		data acc_%eval(&i+1);
+			set acc_%eval(&i+1);
+			Marginal_Precision=min((unique_true_%eval(&i+1)/_freq_),max(0,(unique_true_%eval(&i+1)-tl_so_far)/notlinkedyet));
+			call symput("Marginal_Precision",Marginal_Precision);
+		run;
+		data adjust;
+			set adjust;
+			if pass_group=%eval(&i+1) then Marginal_Precision=&Marginal_Precision;
+		run;
+	%end;
+	proc sort data=adjust;
+		by pass_group;
+	run; 
+	data adj_probs;
+		set adjust;
+		by pass_group;
+		keep Pass pass_group Marginal_Precision;
+		if first.pass_group;
+	run;
+	/* Change from pass_group level to pass level and add variables from quality dataset. */
+	proc sort data=outdata.quality_links_&output_flag;
+		by pass_group;
+	run;
+	data adj_probs;
+		merge adj_probs outdata.quality_links_&output_flag(keep=pass_group prob_false_1p link_pass_no Pass Marginal_Links Links %if &sort_by^=precision %then duplicate_rate; %if &sort_by=passes and %length(&keys)^=0 %then Pass_No;);
+		by pass_group;
+		drop prob_false_1p;
+		if missing(Marginal_Precision) then Marginal_Precision=0;
+		First_Pass_Precision=1-prob_false_1p;
+	run;
+	/* Update quality dataset. */
+	%if &sort_by=precision %then %do;
+		proc sort data=adj_probs(drop=Links);
+			by descending Marginal_Precision descending First_Pass_Precision;
+		run;
+		data outdata.quality_links_&output_flag;
+			format Pass $100. Marginal_Links best8. Links best8. Link_Rate best8. First_Pass_Precision best8. Marginal_Precision best8. Precision best8. Recall best8.;
+			set adj_probs;
+			drop pass_group link_pass_no;
+			retain Links Precision;
+			if _n_=1 then do;
+				Precision=Marginal_Precision;
+				Links=Marginal_Links;
+			end;
+			else do;
+				Precision=(Precision*Links+Marginal_Precision*Marginal_Links)/(Links+Marginal_Links);
+				Links=Links+Marginal_Links;
+			end;
+			Link_Rate=Links/&size_a;
+			Recall=Links*Precision/(&size_a*&prop_matches);
+		run;
+	%end;
+	%else %do;
+		proc sort data=adj_probs;
+			by link_pass_no;
+		run;
+		data outdata.quality_links_&output_flag;
+			format Pass $100. /*pass_group best8. link_pass_no best8.*/ Marginal_Links best8. Links best8. Link_Rate best8. First_Pass_Precision best8. Marginal_Precision best8. Precision best8. Recall best8.;
+			set adj_probs;
+			by link_pass_no;
+			drop pass_group link_pass_no;
+			retain Precision;
+			if _n_=1 then Precision=Marginal_Precision;
+			else Precision=(Precision*Links+Marginal_Precision*Marginal_Links)/(Links+Marginal_Links);
+			Link_Rate=Links/&size_a;
+			Recall=Links*Precision/(&size_a*&prop_matches);
+		run;
+	%end;
+	/* Add adjusted accuracy to linked dataset. */
+	proc sort data=outdata.quality_links_&output_flag out=quality_links;
+		by Pass;
+	run;
+	proc sort data=outdata.links_&output_flag;
+		by Pass;
+	run;
+	data outdata.links_&output_flag;
+		merge outdata.links_&output_flag(%if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=Precision %then drop=prob_false_1p;) quality_links(keep=Pass /*link_pass_no*/ First_Pass_Precision Marginal_Precision Precision);
+		by Pass;
+	run;
+/*	proc sort data=outdata.links_&output_flag;*/
+/*		by descending precision link_pass_no;*/
+/*	run;*/
+	/* Plot results. */
+	data plot_data0;
+		label Links='Links' Marginal_Precision='Marginal Precision' Link_Rate='Link Rate' Precision='Precision' Recall='Recall';
+		if _n_=1 then do;
+			Links=0;
+			Marginal_Precision=1;
+			output;
+		end;
+		set outdata.quality_links_&output_flag;
+		output;
+	run;
+	symbol1	interpol=join height=10pt value=none line=1	width=2	cv=_style_ ci=blue;
+	symbol2 interpol=join height=10pt value=none line=1 width=2 cv=_style_ ci=green;
+	symbol3 interpol=join height=10pt value=none line=1 width=2 cv=_style_ ci=red;
+	symbol4 interpol=stepr height=10pt value=none line=1 width=2 cv=_style_ ci=lime;
+	title1 "Plot for &output_flag";
+	title2 "Link Rate, Precision and Recall Vs Links";
+	proc gplot data=plot_data0 /*outdata.quality_links_&output_flag*/;
+		plot Link_Rate*Links Precision*Links Recall*Links / grid overlay vaxis=axis3 haxis=axis2 legend;
+	run;
+	title1 "Plot for &output_flag";
+	title2 "Link Rate, Precision, Recall and Marginal Precision Vs Links";
+	title3;
+	proc gplot data=plot_data0 /*outdata.quality_links_&output_flag*/;
+		plot Link_Rate*Links Precision*Links Recall*Links Marginal_Precision*Links / grid overlay vaxis=axis5 haxis=axis2 legend vzero;
+	run; 
+	title1 "Plot for &output_flag";
+	title2 "Precision Vs Recall";
+	title3;
+	proc gplot data=plot_data0 /*outdata.quality_links_&output_flag*/;
+		plot Precision*Recall/grid vaxis=axis1 haxis=axis1;
+	run;
+	title1 "Plot for &output_flag";
+	title2 "Precision Vs Recall";
+	title3 "(0-1 Scale)";
+	proc gplot data=plot_data0 /*outdata.quality_links_&output_flag*/;
+		plot Precision*Recall/grid vaxis=axis4 haxis=axis4;
+	run;
+	quit;
+%mend accuracy_adjust_output_3;
+
+
+
+
+/* Uniqueness rate of best pass. */
+%macro marginal_uniqueness_rate_2(quality_measure);
+	proc sort data=all_agreements_dr_1(keep=&id_a &id_b &quality_measure key);
+		by &id_a &quality_measure;
+	run;
+	data best_agreement_pair;
+		set all_agreements_dr_1;
+		by &id_a &quality_measure;
+		retain best_quality_a;
+		drop best_quality_a;
+		rename key=Pass;
+		if first.&id_a then do;
+			best_a='1';
+			best_quality_a=&quality_measure;
+		end;
+		else if &quality_measure=best_quality_a then best_a='1';
+	run;
+	proc sort data=best_agreement_pair;
+		by &id_b &quality_measure;
+	run;
+	data best_agreement_pair;
+		set best_agreement_pair;
+		by &id_b &quality_measure;
+		retain best_quality_b;
+		drop best_a best_b best_quality_b;
+		if first.&id_b then do;
+			best_b='1';
+			best_quality_b=&quality_measure;
+		end;
+		else if &quality_measure=best_quality_b then best_b='1';
+		if best_a='1' and best_b='1' then output;
+	run;
+	proc sql;
+		create table best_agreements_counts_pair as
+		select Pass, count(Pass) as best_agreements_pairs
+		from best_agreement_pair
+		group by Pass
+		order by Pass;
+	quit;
+	proc sort data=outdata.quality_links_&output_flag(drop=Links Link_Rate) out=quality_2;
+		by Pass;
+	run;
+	data quality_2;
+		merge quality_2(in=a) best_agreements_counts_pair;
+		by Pass;
+		drop best_agreements_pairs;
+		if a then do;
+			uniqueness_rate_pair=Marginal_Links/best_agreements_pairs;
+			output;
+		end;
+	run;
+	%if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then %do;
+		proc sort data=quality_2;
+			by descending Marginal_Precision descending First_Pass_Precision;
+		run;
+	%end;
+	%else %if &sort_by=passes and %length(&keys)^=0 %then %do;
+		proc sort data=quality_2;
+			by Pass_No;
+		run;
+	%end;
+	%else %do;
+		proc sort data=quality_2(where=(not missing(&quality_measure)));
+			by &quality_measure;
+		run;
+	%end;
+	%if &stage=0 %then %do; 
+		%global ma_terms;
+		%let ma_terms=100; /* V2.2*/
+	%end;
+	data outdata.quality_links_&output_flag;
+		set quality_2 end=last;
+		rename uniqueness_rate_pair=marginal_uniqueness_rate;
+		retain Links;
+		if _n_=1 then Links=Marginal_Links;
+		else Links=Links+Marginal_Links;
+		Link_Rate=Links/&size_a;
+		%if &stage=0 %then %do;
+			if last then call symput("ma_terms",compress(max(min(round(Links/33.333333333),32767),100)));
+		%end;
+	run;
+	/* Add Marginal Uniqueness Rates to linked dataset. */
+	proc sort data=outdata.quality_links_&output_flag out=quality_by_pass;
+		by Pass;
+	run;
+	proc sort data=outdata.links_&output_flag;
+		by Pass;
+	run;
+	data outdata.links_&output_flag;
+		merge outdata.links_&output_flag quality_by_pass(keep=Pass marginal_uniqueness_rate);
+		by Pass;
+	run;
+	proc sort data=outdata.links_&output_flag;
+		by %if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then descending Marginal_Precision descending First_Pass_Precision Pass;
+			%else %if &sort_by=passes and %length(&keys)^=0 %then Pass_No Pass;
+			%else &quality_measure Pass;;
+	run;
+	/* Smooth Marginal Uniqueness Rate and add to quality file. */
+	proc expand data=outdata.links_&output_flag out=outdata.links_&output_flag(drop=time) method=none;
+    	convert marginal_uniqueness_rate=marginal_uniqueness_rate_ma3pct / transform=(cmovave &ma_terms);
+    run;
+	proc summary data=outdata.links_&output_flag nway;
+		var marginal_uniqueness_rate_ma3pct;
+		by %if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then descending Marginal_Precision descending First_Pass_Precision Pass;
+			%else %if &sort_by=passes and %length(&keys)^=0 %then Pass_No Pass;
+			%else &quality_measure Pass;;
+		/*id pass;*/
+		output out=marginal_uniqueness_rate_ma3pct(keep=marginal_uniqueness_rate_ma3pct Pass %if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then Marginal_Precision First_Pass_Precision;
+																							 %else %if &sort_by=passes and %length(&keys)^=0 %then Pass_No;
+																							 %else &quality_measure;) 
+			   mean=marginal_uniqueness_rate_ma3pct;
+	run;
+	data outdata.quality_links_&output_flag;
+		format Pass $100. 
+			   %if &sort_by=passes and %length(&keys)^=0 %then Pass_No best8.; 
+			   %if &quality_measure=duplicate_rate %then duplicate_rate best8.; 
+			   marginal_uniqueness_rate best8. marginal_uniqueness_rate_ma3pct best8. Marginal_Links best8. Links best8. Link_Rate best8.;
+		merge outdata.quality_links_&output_flag 
+			  marginal_uniqueness_rate_ma3pct/*(drop=Pass)*/;
+		by %if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then descending Marginal_Precision descending First_Pass_Precision Pass;
+			%else %if &sort_by=passes and %length(&keys)^=0 %then Pass_No Pass;
+			%else &quality_measure Pass;;
+	run;
+	/* Reorder variables in linked dataset. */
+	data outdata.links_&output_flag;
+		format %if &quality_measure=duplicate_rate %then duplicate_rate best8.; marginal_uniqueness_rate best8. marginal_uniqueness_rate_ma3pct best8.; 
+		set outdata.links_&output_flag;
+	run;
+	/* Plot results. */
+	legend1;
+	title1 "Plot for &output_flag";
+	title2 "Marginal Uniqueness Rate Vs Links";
+	%if &stage=0 %then %do;
+		data plot_data0;
+		label Links='Links' marginal_uniqueness_rate='Marginal Uniqueness Rate' marginal_uniqueness_rate_ma3pct="Marginal Uniqueness Rate (&ma_terms links MA)";
+		%if %length(&m_probs)>0 and %length(&u_probs)>0 %then label Marginal_Precision='Marginal Precision' Precision='Precision';;
+		if _n_=1 then do;
+			Links=0;
+			marginal_uniqueness_rate=1;
+			%if %length(&m_probs)>0 and %length(&u_probs)>0 %then Marginal_Precision=1;;
+			output;
+		end;
+			set outdata.quality_links_&output_flag;
+			output;
+		run;
+		/* Plot with step interpolation for marginal uniqueness rate. */
+		symbol1	interpol=stepr height=10pt value=none line=1 width=2 cv=_style_ ci=blue;
+		symbol2 interpol=join height=10pt value=none line=1 width=2 cv=_style_ ci=red;
+		proc gplot data=plot_data0;
+			plot marginal_uniqueness_rate*Links marginal_uniqueness_rate_ma3pct*Links / grid overlay vaxis=axis3 haxis=axis2 legend;
+		run;
+		quit;
+	%end;
+	%if %length(&m_probs)>0 and %length(&u_probs)>0 %then %do;
+		title2 "Marginal Uniqueness Rate, Precision and Marginal Precision Vs Links";
+		symbol3 interpol=join height=10pt value=none line=1 width=2 cv=_style_ ci=green;
+		symbol4 interpol=stepr height=10pt value=none line=1 width=2 cv=_style_ ci=lime;
+		proc gplot data=plot_data0 /*outdata.quality_links_&output_flag*/;
+			plot marginal_uniqueness_rate*Links marginal_uniqueness_rate_ma3pct*Links Precision*Links Marginal_Precision*Links / grid overlay vaxis=axis3 haxis=axis2 legend;
+		run;
+		quit;
+	%end;
+	/* Combine quality_links and agreements into a summary file. */
+	proc sort data=outdata.quality_links_&output_flag;
+		by Pass;
+	run;
+	proc sort data=outdata.agreements_&output_flag;
+		by Pass;
+	run;
+	proc sort data=key_file_dedup(where=(not missing(key))) out=key_file_dedup_2(rename=(key=Pass));
+		by key;
+	run;
+	data outdata.summary_&output_flag;
+		merge outdata.quality_links_&output_flag(in=a) outdata.agreements_&output_flag(in=b) key_file_dedup_2(keep=Pass);
+		by Pass;
+		if not a then Marginal_Links=0;
+		if not b then no_agreements=0;
+	run;
+	proc sort data=outdata.summary_&output_flag;
+		by  %if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then descending Marginal_Precision descending First_Pass_Precision Pass;
+			%else %if &sort_by=passes and %length(&keys)^=0 %then Pass_No Pass;
+			%else &quality_measure Pass;;
+	run;
+	data outdata.summary_&output_flag;
+		set outdata.summary_&output_flag;
+		drop lag_links lag_link_rate;
+		retain lag_links lag_link_rate;
+		if _n_=1 and missing(Links) then do;
+			Links=0;
+			Link_Rate=0;
+		end;
+		if not missing(Links) then lag_links=Links;
+		else Links=lag_links;
+		if not missing(Link_Rate) then lag_link_rate=Link_Rate;
+		else Link_Rate=lag_link_rate;
+		%if %length(&m_probs)>0 and %length(&u_probs)>0 %then %do;
+			drop lag_precision lag_recall;
+			retain lag_precision lag_recall;
+			if _n_=1 and missing(Precision) then do;
+				Precision=0;
+				Recall=0;
+			end;
+			if not missing(Precision) then lag_precision=Precision;
+			else Precision=lag_precision;
+			if not missing(Recall) then lag_recall=Recall;
+			else Recall=lag_recall;
+		%end;
+	run;
+%mend marginal_uniqueness_rate_2;
+
+
+
+%macro collate;
+	%global non_zero_agreements non_zero_links dr_hi;
+	%let non_zero_agreements=0;
+	%let non_zero_links=0;
+	%let dr_hi=0;
+	/* Save all_agreements_&outputflag to different name temporarily. */
+	%if &stage=1 %then %do;
+		data all_agreements_save;
+			set outdata.all_agreements_&output_flag;
+		run;
+	%end;
+	/* Keep rates for stage. */
+	data rates_stage_&stage;
+		set outdata.summary_&output_flag;
+		keep Pass duplicate_rate marginal_uniqueness_rate no_agreements Marginal_Links;
+		rename duplicate_rate=duplicate_rate_s&stage 
+			   marginal_uniqueness_rate=marginal_uniqueness_rate_s&stage
+			   no_agreements=no_agreements_s&stage
+			   Marginal_Links=Marginal_Links_St&stage;
+	run;
+	proc sort data=rates_stage_&stage;
+		by Pass;
+	run;
+	/* Select passes to keep from the current stage. */
+	%let link_cutoff=0;
+	%let links_dr_low=0;
+	data summary_stage_&stage;
+		set outdata.summary_&output_flag;
+		Stage=&stage;
+		drop Links Link_Rate;
+		if Stage>1 and no_agreements=0 then delete;
+		if Marginal_Links>0 then do;
+			err_s=abs(1-(duplicate_rate+marginal_uniqueness_rate_ma3pct));
+			err_ns=abs(1-(duplicate_rate+marginal_uniqueness_rate));
+			if duplicate_rate>(1-&min_uniqueness_rate) then do;
+				call symput("dr_hi",1);
+				stop;
+			end;
+			if err_s>&stage_threshold and err_ns>&stage_threshold then stop;
+			else call symput("links_dr_low",1);
+		end;
+		call symput("link_cutoff",Links);
+	run;
+	/* Plot stage cutoff. */
+	data _null_;
+		set outdata.quality_links_&output_flag end=last;
+		retain min_proportion 1 max_proportion 0;
+		if marginal_uniqueness_rate<min_proportion then min_proportion=marginal_uniqueness_rate;
+		if marginal_uniqueness_rate>max_proportion then max_proportion=marginal_uniqueness_rate;
+		if last then do;
+			call symput("min_proportion",min_proportion);
+			call symput("max_proportion",max_proportion);
+		end;
+	run;
+	data plot_data;
+		set outdata.quality_links_&output_flag;
+		label stage_cutoff='Stage Cutoff' 
+			  Links='Links' 
+			  marginal_uniqueness_rate='Marginal Uniqueness Rate' 
+			  marginal_uniqueness_rate_ma3pct="Marginal Uniqueness Rate (&ma_terms links MA)";
+		if _n_=1 then do;
+			output;
+			Links=0;
+			marginal_uniqueness_rate=1;
+			call missing(marginal_uniqueness_rate_ma3pct);
+			output;
+			stage_cutoff=&min_proportion;
+			Links=&link_cutoff;
+			call missing(marginal_uniqueness_rate);
+			call missing(marginal_uniqueness_rate_ma3pct);
+			output;
+			stage_cutoff=1 /*&max_proportion*/;
+			Links=&link_cutoff;
+			output;
+		end;
+		else output;
+	run;
+	proc sort data=plot_data;
+		by Links;
+	run;
+	title1 "Plot for &output_flag";
+	title2 "Marginal Uniqueness Rate Vs Links for Stage &stage";
+	/*Temporarily change symbol2 to red and symbol3 to dash. */
+	symbol2 interpol=join height=10pt value=none line=1 width=2 cv=_style_ ci=red;
+	symbol3 interpol=join height=10pt value=none line=4 width=2 cv=black ci=black;
+	proc gplot data=plot_data;
+		plot marginal_uniqueness_rate*Links marginal_uniqueness_rate_ma3pct*Links stage_cutoff*Links / grid overlay vaxis=axis3 haxis=axis2 legend;
+	run;
+	quit;
+	%if &dr_hi=0 %then %do;
+		/* Select links to keep from current stage. */
+		proc sort data=summary_stage_&stage;
+			by Pass;
+		run;
+		proc sort data=outdata.links_&output_flag out=links_stage_&stage;
+			by Pass;
+		run;
+		data links_stage_&stage;
+			merge links_stage_&stage(in=a) summary_stage_&stage(in=b keep=Pass Stage);
+			by Pass;
+			if a and b;
+		run;
+		data _null_;
+			set links_stage_&stage;
+			if _n_=1 then call symput("non_zero_links",1);
+		run;
+		/* Remove kept passes from all_agreements to ensure that each pass appears in only one stage. */
+		proc sort data=all_agreements;
+			by key;
+		run;
+		data all_agreements;
+			merge all_agreements(where=(not missing(key))) summary_stage_&stage(in=del_pass rename=(Pass=key) keep=Pass);
+			by key;
+			if not del_pass;
+		run;
+		/* Remove kept File_a records from all_agreements. */
+		proc sort data=links_stage_&stage;
+			by &id_a;
+		run;
+		proc sort data=all_agreements;
+			by &id_a;
+		run;
+		data all_agreements;
+			merge all_agreements links_stage_&stage(in=del_rec keep=&id_a);
+			by &id_a;
+			if not del_rec;
+		run;
+		/* Remove kept File_b records from all_agreements. */
+		proc sort data=links_stage_&stage;
+			by &id_b;
+		run;
+		proc sort data=all_agreements;
+			by &id_b;
+		run;
+		data all_agreements;
+			merge all_agreements links_stage_&stage(in=del_rec keep=&id_b);
+			by &id_b;
+			if not del_rec;
+		run;
+		data _null_;
+			set all_agreements;
+			if _n_=1 then call symput("non_zero_agreements",1);
+		run;
+	%end;
+	/* If no new links before the cutoff or the duplicate rate of 20% has been reached, keep all the links including those after the cutoff. */
+	%if &non_zero_links=0 or &dr_hi=1 %then %do;
+		data summary_stage_&stage;
+			set outdata.summary_&output_flag;
+			%if &dr_hi=1 and &links_dr_low=1 %then %do;
+				if duplicate_rate<=(1-&min_uniqueness_rate) then Stage=&stage;
+				else Stage=&stage+1;
+			%end;
+			%else Stage=&stage;;
+			drop Links Link_Rate;
+			if Stage>1 and no_agreements=0 then delete;
+		run;
+		data links_stage_&stage;
+			set outdata.links_&output_flag;
+			%if &dr_hi=1 and &links_dr_low=1 %then %do;
+				if duplicate_rate<=(1-&min_uniqueness_rate) then Stage=&stage;
+				else Stage=&stage+1;
+			%end;
+			%else Stage=&stage;;
+		run;
+	%end;
+	/* Combine stages if no new links before cutoff, no more passes, no more unlinked records or duplicate rate in stage reaches 20%. */	
+	%if &non_zero_agreements=0 or &non_zero_links=0 or &dr_hi=1 %then %do;
+		data outdata.links_&output_flag;
+			set %do j=1 %to &stage; links_stage_&j %end;;
+		run;
+		proc sort data=outdata.links_&output_flag;
+			by Stage duplicate_rate;
+		run;
+ 		data outdata.summary_&output_flag;
+			set %do j=1 %to &stage; summary_stage_&j %end;;
+		run;
+		data outdata.all_agreements_&output_flag;
+			set all_agreements_save;
+		run;
+		proc sort data=outdata.summary_&output_flag;
+			by Pass;
+		run;
+		data stage_rates_&output_flag;
+			format Stage best8. Pass $100.  %do j=1 %to &stage; duplicate_rate_s&j best8. %end; duplicate_rate best8. 
+											%do j=1 %to &stage; marginal_uniqueness_rate_s&j best8. %end;
+											%do j=1 %to &stage; Marginal_Links_St&j best8. %end;
+											%do j=1 %to &stage; no_agreements_s&j best8. %end;;
+			merge outdata.summary_&output_flag(in=a keep=Stage Pass duplicate_rate)  
+				  %do j=1 %to &stage; rates_stage_&j %end;;
+			by Pass;
+			if not a then do;
+				duplicate_rate=1;
+				if &dr_hi=1 and &links_dr_low=1 then Stage=&stage+1;
+				else Stage=&stage;
+				%do j=1 %to &stage;
+					if missing(duplicate_rate_s&j) then duplicate_rate_s&j=1;
+				%end;
+			end;
+		run;
+		/* Add back passes that have no agreements. */
+		data outdata.summary_&output_flag;
+			merge outdata.summary_&output_flag(in=a) stage_rates_&output_flag(keep=Pass Stage duplicate_rate);
+			by Pass;
+			if not a then do;
+				no_agreements=0;
+				Marginal_Links=0;
+			end;
+		run;
+		proc sort data=outdata.summary_&output_flag;
+			by Stage duplicate_rate;
+		run;
+		data outdata.summary_&output_flag;
+			set outdata.summary_&output_flag;
+			retain Links;
+			if Stage=1 and _n_=1 then Links=Marginal_Links;
+			else Links=Links+Marginal_Links;
+			Link_Rate=Links/&size_a;
+		run;
+		/* Calculate mean rates per stage. */
+		proc summary data=outdata.summary_&output_flag nway;
+			var duplicate_rate marginal_uniqueness_rate;
+			weight Marginal_Links;
+			class Stage;
+			output out=mean_rates(keep=stage_duplicate_rate stage_marginal_uniqueness_rate Stage)
+								  mean=stage_duplicate_rate stage_marginal_uniqueness_rate;
+		run;
+		data outdata.summary_&output_flag;
+			format Stage best8. Pass $100. duplicate_rate best8. stage_duplicate_rate best8. marginal_uniqueness_rate best8. stage_marginal_uniqueness_rate best8. 
+			marginal_uniqueness_rate_ma3pct best8. Marginal_Links best8. Links best8. Link_Rate best8.;
+			merge outdata.summary_&output_flag mean_rates;
+			by Stage;
+		run;
+		/* Calculate duplicate rate rankings by stage. */
+		%do j=1 %to &stage;
+			proc sort data=stage_rates_&output_flag;
+				by duplicate_rate_s&j;
+			run;
+			data stage_rates_&output_flag;
+				set stage_rates_&output_flag;
+				Rank_St&j=_n_;
+			run;
+		%end;
+		proc sort data=stage_rates_&output_flag;
+			by Stage duplicate_rate;
+		run;
+		/* Plot marginal uniqueness rate by stage. */
+		data stage_plot;
+			set outdata.summary_&output_flag;
+			drop Links marginal_uniqueness_rate marginal_uniqueness_rate_ma3pct;
+			retain last_stage last_links last_mur last_mur_s;
+			if _n_=1 then do;
+				last_stage=Stage;
+				last_links=Links;
+				last_mur=marginal_uniqueness_rate;
+				last_mur_s=marginal_uniqueness_rate_ma3pct;
+			end;
+			if Stage^=last_stage then do;
+				min_links=last_links;
+				min_marginal_uniqueness_rate=last_mur;
+				min_marginal_uniqueness_rate_s=last_mur_s;
+				extra=1;
+				output;
+			end;
+			last_stage=Stage;
+			last_links=Links;
+			if not missing(marginal_uniqueness_rate) then last_mur=marginal_uniqueness_rate;
+			if not missing(marginal_uniqueness_rate_ma3pct) then last_mur_s=marginal_uniqueness_rate_ma3pct;
+		run;
+		data stage_plot;
+			set outdata.summary_&output_flag 
+				stage_plot(rename=(min_links=Links min_marginal_uniqueness_rate=marginal_uniqueness_rate min_marginal_uniqueness_rate_s=marginal_uniqueness_rate_ma3pct));
+			label Links='Links'
+				  marginal_uniqueness_rate='Marginal Uniqueness Rate'
+				  marginal_uniqueness_rate_ma3pct="Marginal Uniqueness Rate (&ma_terms links MA)"
+				  Stage='Stage';
+			if _n_=1 then do;
+				output;
+				Links=0;
+				Stage=1;
+				marginal_uniqueness_rate=1;
+				call missing(marginal_uniqueness_rate_ma3pct);
+				output;
+			end;
+			else output;
+		run;
+		proc sort data=stage_plot;
+			by Stage Links;
+		run;
+		title1 "Plot for &output_flag";
+		title2 "Marginal Uniqueness Rate Vs Links for All Stages";
+		%do i=1 %to %eval(&stage+1);
+			symbol&i interpol=stepr height=10pt value=none line=1 width=2 cv=_style_;
+		%end;
+		proc gplot data=stage_plot;
+				plot marginal_uniqueness_rate*Links=Stage/grid vaxis=axis1 haxis=axis2;
+		run;
+		quit;
+		/*%do i=1 %to %eval(&stage+1);
+			symbol&i interpol=join height=10pt value=none line=1 width=2 cv=_style_;
+		%end;
+		title2 "Marginal Uniqueness Rate (&ma_terms links MA) Vs Links for All Stages";
+		proc gplot data=stage_plot;
+				plot marginal_uniqueness_rate_ma3pct*Links=Stage/grid vaxis=axis1 haxis=axis2;
+		run;
+		quit;*/
+	%end;
+%mend;
+
+
+
+
+/* Output duplicates if using deduplication mode. */
+%macro output_duplicates_2;
+	/* Remove duplcates that refer to the same record and keep one instance of each duplicate pair. */
+	data outdata.duplicates_&output_flag;
+		set non_unique;
+		rename key=Pass;
+		if &id_a=&id_b then delete;
+	run;
+	proc sort data=outdata.duplicates_&output_flag;
+		by &id_a &id_b duplicate_rate;
+	run;
+	data outdata.duplicates_&output_flag;
+		set outdata.duplicates_&output_flag;
+		by &id_a &id_b duplicate_rate;
+		if first.&id_b;
+		rename &id_a=t&id_a &id_b=t&id_b;
+	run;
+	data outdata.duplicates_&output_flag;
+		set outdata.duplicates_&output_flag;
+		array concatid t:;
+		if vtype(t&id_a)='C' then call sortc(of concatid(*));
+		else call sortn(of concatid(*));
+		rename t&id_a=&id_a t&id_b=&id_b;
+
+	run;
+	proc sort data=outdata.duplicates_&output_flag nodupkey;
+		by &id_a &id_b;
+	run;
+	/* Summary table of duplicates. */
+	proc sort data=outdata.duplicates_&output_flag out=key_rate;
+		by Pass;
+	run;
+	data key_rate;
+		set key_rate;
+		by Pass;
+		if first.Pass then output;
+		keep Pass duplicate_rate;
+	run;
+	proc sql;
+		create table duplicates_by_key as
+		select Pass, count(Pass) as Duplicate_Pairs
+		from outdata.duplicates_&output_flag
+		group by Pass
+		order by Pass;
+	quit;
+	data outdata.summary_&output_flag;
+		merge duplicates_by_key key_rate;
+		by Pass;
+	run;
+	proc sort data=outdata.summary_&output_flag;
+		by duplicate_rate;
+	run;
+%mend;
+
+
+
+
+/* Replace Duplicate Rate with Uniqueness Rate in output.  Rename some variables in output.  
+If the auto stage option is used, merge stage_rates_&output_flag onto outdata.summary_&output_flag. */
+%macro replace_duplicate_rate;
+	data outdata.summary_&output_flag;
+		set outdata.summary_&output_flag;
+		%if not (%length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision) %then %do;
+			duplicate_rate=1-duplicate_rate;
+			rename duplicate_rate=UR;
+		%end;
+		%if &dedupmode=0 %then %do;
+			rename marginal_uniqueness_rate=MUR
+			   	   marginal_uniqueness_rate_ma3pct=MUR_S
+			   	   no_agreements=Agreements;
+		%end;
+	run;
+	%if &dedupmode=0 %then %do;
+		data outdata.links_&output_flag;
+			set outdata.links_&output_flag;
+			%if not (%length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision) %then %do;
+				duplicate_rate=1-duplicate_rate;
+				rename duplicate_rate=UR;
+			%end;
+			rename marginal_uniqueness_rate=MUR
+				   marginal_uniqueness_rate_ma3pct=MUR_S;
+		run;
+	%end;
+	%else %do;
+		data outdata.duplicates_&output_flag;
+			set outdata.duplicates_&output_flag;
+			duplicate_rate=1-duplicate_rate;
+			rename duplicate_rate=UR;
+		run;
+	%end;
+	%if &no_filter_vars>0 %then %do;
+		data outdata.ur_filters_&output_flag;
+			set outdata.ur_filters_&output_flag;
+			new_duplicate_rate=1-new_duplicate_rate;
+			old_duplicate_rate=1-old_duplicate_rate;
+			rename new_duplicate_rate=New_UR
+				   old_duplicate_rate=Old_UR;
+		run;
+	%end;
+	%if &no_priorities>0 %then %do;
+		data outdata.ur_priorities_&output_flag;
+			set outdata.ur_priorities_&output_flag;
+			new_duplicate_rate=1-new_duplicate_rate;
+			original_duplicate_rate=1-original_duplicate_rate;
+			rename new_duplicate_rate=New_UR
+				   original_duplicate_rate=Old_UR
+				   duplicate_rate_change=UR_Change;
+		run;
+	%end;
+	%if &stage>0 %then %do;
+		data stage_rates_&output_flag;
+			set stage_rates_&output_flag;
+			%do j=1 %to &stage;
+				duplicate_rate_s&j=1-duplicate_rate_s&j;
+				rename duplicate_rate_s&j=UR_St&j
+					   marginal_uniqueness_rate_s&j=MUR_St&j
+					   no_agreements_s&j=Agreements_St&j;
+			%end;
+			duplicate_rate=1-duplicate_rate;
+			rename duplicate_rate=UR;
+		run;
+		proc sort data=stage_rates_&output_flag;
+			by Stage descending UR Pass;
+		run;
+		proc sort data=outdata.summary_&output_flag;
+			by Stage descending UR Pass;
+		run;
+		data outdata.summary_&output_flag;
+			merge outdata.summary_&output_flag stage_rates_&output_flag;
+			by Stage descending UR Pass;
+			drop stage_marginal_uniqueness_rate stage_duplicate_rate err_s err_ns;
+		run;
+	%end;
+%mend;
+
+
+
+
+/* Remove pass number from the start of pass name if they were manually entered. */
+%macro remove_passno;
+	data outdata.summary_&output_flag;
+		format %if &stage>0 %then Stage best8.; Pass_No best8. Pass $100.;
+		set outdata.summary_&output_flag(rename=(Pass=lpass));
+		Pass=scan(lpass,-1,'+');
+		Pass_No=input(scan(lpass,1,'+'),best8.);
+		drop lpass;
+	run;
+	%if &no_filter_vars>0 %then %do;
+		data outdata.ur_filters_&output_flag;
+			set outdata.ur_filters_&output_flag(rename=(Pass=lpass));
+			Pass=scan(lpass,-1,'+');
+			drop lpass;
+		run;
+	%end;
+	%if &no_priorities>0 %then %do;
+		data outdata.ur_priorities_&output_flag;
+			set outdata.ur_priorities_&output_flag(rename=(Pass=lpass));
+			Pass=scan(lpass,-1,'+');
+			drop lpass;
+		run;
+	%end;
+	%if &dedupmode=0 %then %do;
+		data outdata.all_agreements_&output_flag;
+			format Pass $100.;
+			set outdata.all_agreements_&output_flag(rename=(Pass=lpass));
+			Pass=scan(lpass,-1,'+');
+			drop lpass;
+		run;
+		data outdata.links_&output_flag;
+			format %if &stage>0 %then Stage best8.;  Pass $100.;
+			set outdata.links_&output_flag(rename=(Pass=lpass));
+			Pass=scan(lpass,-1,'+');
+			drop lpass;
+		run;
+	%end;
+	%else %do;
+		data outdata.duplicates_&output_flag;
+			format Pass $100.;
+			set outdata.duplicates_&output_flag(rename=(Pass=lpass));
+			Pass=scan(lpass,-1,'+');
+			drop lpass;
+		run;
+	%end;
+%mend remove_passno;	
+
+
+/* Put secondary_id onto the output file */
+%macro merge_on_secondary_id;
+	/* Drop the first two characters in key */
+	data all_agreements_dups;
+		set all_agreements_dups;
+		key = scan(key,2,"+");
+	run;
+	%if &dedupmode = 0 %then
+		%do;
+			proc sql;
+				create table outdata.links_&output_flag. as
+				select a.*
+						%if %length(&secondary_id_a) > 0 %then ,b.&secondary_id_a;
+ 						%if %length(&secondary_id_b) > 0 %then ,b.&secondary_id_b;
+				from outdata.links_&output_flag as a
+					left join all_agreements_dups as b
+					on a.&id_a=b.&id_a and a.&id_b=b.&id_b and a.pass=b.key
+				order by %if &stage>0 %then a.Stage,; a.UR descending, a.&id_a %if %length(&secondary_id_a) > 0 %then ,b.&secondary_id_a; %if %length(&secondary_id_b) > 0 %then ,b.&secondary_id_b;;
+			quit;	
+		%end;
+	%else
+		%do;
+			proc sql;
+				create table outdata.duplicates_&output_flag. as
+				select a.pass
+						,a.UR
+						,a.&id_a
+						,a.&id_b
+						%if %length(&secondary_id_a) > 0 %then ,b.&secondary_id_a;
+ 						%if %length(&secondary_id_b) > 0 %then ,b.&secondary_id_b;
+				from outdata.duplicates_&output_flag as a
+					left join all_agreements_dups as b
+					on a.&id_a=b.&id_a and a.&id_b=b.&id_b and a.pass=b.key
+				order by /*a.UR descending*/ a.&id_a, a.&id_b %if %length(&secondary_id_a) > 0 %then ,b.&secondary_id_a; %if %length(&secondary_id_b) > 0 %then ,b.&secondary_id_b;;
+			quit;
+		%end;
+%mend merge_on_secondary_id;
+
+	
+%macro compute_run_time;
+	data time_record;
+			set time_record;
+			label job_run_time="Run time for &output_flag";
+			finish=datetime();
+			duration=finish-start;
+			hours=int(duration/3600);
+			minutes=int(duration/60)-60*hours;
+			seconds=round(duration-3600*hours-60*minutes,1);
+			if hours>0 then job_run_time=catx(' ',hours,'Hours',minutes,'Minutes',seconds,'Seconds.');
+			else if minutes>0 then job_run_time=catx(' ',minutes,'Minutes',seconds,'Seconds.');
+			else job_run_time=catx(' ',seconds,'Seconds.');
+		run;
+	title1;
+	title2;
+	title3;
+	proc print data=time_record label noobs;
+		var job_run_time;
+	run;
+%mend compute_run_time;
+
+
+
+
+/* MAIN MACRO. */
+%macro dmac(input_folder_a=, dataset_a=, id_a=, secondary_id_a=, variables_to_compare_a=,
+					 input_folder_b=, dataset_b=, id_b=, secondary_id_b=, variables_to_compare_b=,
+					 components=, comparators=, var_lengths=,
+					 priorities=, filter_vars=, sort_by=,
+					 prop_matches=, m_probs=, u_probs=,
+					 group_1=, group_2=, group_3=, group_4=, group_5=, group_6=, group_7=, group_8=, group_9=,
+				  	 critical_vars_1=, critical_vars_2=, critical_vars_3=, critical_vars_4=, critical_vars_5=, critical_vars_6=, critical_vars_7=, critical_vars_8=, critical_vars_9=,
+					 min_block_no=,
+					 output_folder=, output_flag=, agreements_folder=, 
+					 keys=);
+	
+	/* CHECK IF USING DEDUPLICATION MODE AND SET LIBRARIES. */
+	%dedup_mode_libraries;
+
+
+	/* VALIDATE INPUTS, EG. LIST LENGTHS ARE EQUAL, NO ILLEGAL PARAMETER VALUES. */
+	%validate_inputs;
+
+
+	/* SET LOG FILE AND SUPPRESS OUTPUT. */
+	proc printto log="&output_folder.\log_&output_flag..txt" new;
+	run; 
+	ods select none;
+
+
+	/* SET GRAPHICS PARAMETERS.  CLEAR AGREEMENTS FOLDER. */
+	%let stage=0;
+	axis1 style=1 width=1 major=(number=11) minor=none;
+	axis2 style=1 width=1 major=(number=11) minor=none value=(angle=-90);
+	axis3 style=1 width=1 major=(number=11) minor=none label=none; /* Vertical axis with no label. */
+	axis4 style=1 width=1 order=(0 to 1 by 0.05) minor=none;
+	axis5 style=1 width=1 order=(0 to 1 by 0.05) minor=none label=none; /* 0-1 Vertical axis with no label. */
+	proc datasets library=agrdata kill;
+	run;
+	quit;
+	
+
+	/* READ IN DATASETS, RENAME VARIABLES AND SET FORMATS TO SUIT COMPARATORS, READ IN FILTER AND PRIORITY VARIABLES. */
+	%listchange(&variables_to_compare_a,variables_to_compare_a_numbered,prefix=a,suffix=NUMBER,listlength=no_vars);
+	%listchange(&variables_to_compare_b,variables_to_compare_b_numbered,prefix=b,suffix=NUMBER);
+	%reformat_vl;
+	%dr_filters_a;
+	%dr_priorities_a;
+
+
+	/*AUTOMATICALLY GENERATE PASSES/KEYS THEN DO JOINS. */
+	%if %length(&keys)=0 %then %do;
+		/* COUNT NUMBER OF DISTINCT VALUES OF EACH LINKING VARIABLE. LATER USE THESE TO ESTIMATE THE NUMBER OF BLOCKS FOR EACH PASS/KEY. */
+		%categories;
+		/* FORM GROUPS OF VARIABLES TO IDENTIFY UNNECESSARY PASSES/KEYS. */
+		%groups;
+		/* SETUP VARIABLES FOR DETERMINING PASSES/KEYS THAT DON'T CONTAIN ANY CRITICAL VARIABLES. */
+		%setup_cvs;
+		/* FORM COMPARISON SPACE FOR EACH COMBINATION (UP TO 10 AT A TIME) OF LINKING VARIABLES THAT HAS AT LEAST &MIN_BLOCK_NO THEORETICAL BLOCKS. */
+		%join_compare;
+		%dedup_ids;
+	%end;
+	/* OR READ MANUALLY ENTERED PASSES/KEYS THEN DO JOINS. */
+	%else %do; 
+		%keylist;
+		%sql_joins;
+		%dedup_ids;
+	%end;
+	ods select all;
+	run;
+	ods graphics on;
+	ods pdf file="&output_folder.\Plots_&output_flag..pdf";
+
+
+	/* IF NOT IN DEDUPLICATION MODE AND M & U PROBABILITIES HAVE BEEN PROVIDED AND &SORT_BY=precision, THEN ESTIMATE LINK ACCURACY AND RESOLVE LINKS ACCORDING TO 
+	THAT.  SORT RESULTS AND OUTPUT FREQUENCY TABLES OF LINKS MADE BY EACH PASS/KEY. */
+	%if &dedupmode=0 %then %do;
+		%if %length(&m_probs)>0 and %length(&u_probs)>0 and &sort_by=precision %then %do;
+			%resolve_links_a(prob_false_1p);
+			%prob_false_f;
+			%resolve_links_b(prob_false_1p);
+			%resolve_links_c(prob_false_1p);
+			%tables_sort(prob_false_1p);
+			%accuracy_adjust_output_3;
+			%marginal_uniqueness_rate_2(prob_false_1p);
+		%end;
+
+
+	/* OTHERWISE IF NOT IN DEDUPLICATION MODE THEN CALCULATE DUPLICATE RATE FOR EACH PASS/KEY BASED ON COMPARISONS IN 'ALL_AGREEMENTS'.  IF &SORT_BY=passes, THEN 
+	PENALISE DUPLICATE RATES BY KEY_NO.  OTHERWISE ADJUST DUPLICATE RATES FOR FILTER VARIABLES AND PRIORITIES IF PROVIDED AND RESOLVE LINKS USING DUPLICATE RATE.
+	ESTIMATE LINK ACCURACY IF M AND U PROBABILITIES WERE PROVIDED.  SORT RESULTS AND OUTPUT FREQUENCY TABLES OF LINKS MADE BY EACH PASS/KEY. */
+		%else %do;
+			%duplicate_rate_calculator_3;
+			%if %length(&keys)>0 %then %dr_penalty;
+			%if &sort_by^=passes %then %do;
+				%if &no_filter_vars>0 %then %dr_filters_b;
+				%if &no_priorities>0 %then %dr_priorities_b;
+			%end;
+			%if %length(&m_probs)>0 and %length(&u_probs)>0 %then %do;
+				%resolve_links_a(duplicate_rate);
+				%resolve_links_b(duplicate_rate);
+				%resolve_links_c(duplicate_rate);
+				%prob_false_f;
+				%tables_sort(duplicate_rate);
+				%accuracy_adjust_output_3;
+				%marginal_uniqueness_rate_2(duplicate_rate);
+			%end;
+			%else %do;
+				%resolve_links_c(duplicate_rate);
+				%tables_sort(duplicate_rate);
+				%marginal_uniqueness_rate_2(duplicate_rate);
+				%global stage_threshold min_uniqueness_rate;
+				%if %length(&stage_threshold)>0 and &sort_by^=passes and &no_filter_vars=0 and &no_priorities=0 and 
+				%length(&m_probs)=0 and %length(&u_probs)=0 %then %do;
+					%if &stage_threshold<=0 %then %let stage_threshold=0.0005;
+					%if %length(&min_uniqueness_rate)=0 or &min_uniqueness_rate>=1 %then %let min_uniqueness_rate=0.8;
+					%let stage=1;
+					%let next_stage=2;
+					%collate;
+					%do %while (&non_zero_agreements=1 and &non_zero_links=1 and &dr_hi=0);
+						%duplicate_rate_calculator_3;
+						%if %length(&keys)>0 %then %dr_penalty;
+						%resolve_links_c(duplicate_rate);
+						%tables_sort(duplicate_rate);
+						%marginal_uniqueness_rate_2(duplicate_rate);
+						%let stage=%eval(&stage+1);
+						%let next_stage=%eval(&stage+1);
+						%collate;
+					%end;
+				%end;
+			%end;
+		%end;
+	%end;
+
+
+	/* IF USING DEDUPLICATION MODE. */
+	%else %do;
+		%duplicate_rate_calculator_3;
+		%if %length(&keys)>0 %then %dr_penalty;
+		%if &sort_by^=passes %then %do;
+			%if &no_filter_vars>0 %then %dr_filters_b;
+			%if &no_priorities>0 %then %dr_priorities_b;
+		%end;
+		%resolve_links_a(duplicate_rate);
+		%output_duplicates_2;
+	%end;
+
+
+	/* REPLACE DUPLICATE RATE WITH UNIQUENESS RATE. */
+	%replace_duplicate_rate;
+	
+
+	/* REMOVE ORDERING FROM PASS NAMES. */
+	%if %length(&keys)>0 %then %remove_passno;
+
+	/* ADD SECONDARY IDS BACK ON. */
+	%if %length(&SECONDARY_ID_a.) > 0 or %length(&SECONDARY_ID_b.) > 0 %then %merge_on_secondary_id;
+
+	/* DELETE REDUNDANT QUALITY DATASETS. */
+	ods select none;
+	%if &dedupmode=0 %then %do;
+		proc datasets library=outdata;
+			delete quality_links_&output_flag agreements_&output_flag;
+			change all_agreements_&output_flag=agreements_&output_flag;
+		run;
+		quit;
+	%end;
+	%else %do;
+		proc datasets library=outdata;
+			delete dataset_b_temp;
+		run;
+		quit;
+	%end;
+	ods select all;
+	run;
+
+
+	/* COMPUTE RUN TIME. */
+	%compute_run_time;
+
+	ods pdf close;
+	ods graphics off;
+	proc printto;
+	run;
+
+%mend dmac;
+
+
