@@ -1,0 +1,105 @@
+---
+title: "CONONICAL INFORMATION MODEL FOR SECTORS"
+output: 
+  flexdashboard::flex_dashboard:
+    storyboard: true
+    social: menu
+    
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+```
+
+### CONONICAL INFORMATION MODEL - ENTITY RELATIONSHIP VIEW FOR THE SHOOLS AND YOUTH SECTOR
+
+```{r}
+library(visNetwork)
+library(tidyverse)
+library(readxl)
+
+Nodes = read_excel('J:\\My Documents\\NEEB\\tmp\\cononical_model_shools.xlsx',sheet = 'nodes')
+Edges = read_excel('J:\\My Documents\\NEEB\\tmp\\cononical_model_shools.xlsx',sheet = 'edges')
+
+#Nodes$shape = NULL
+Nodes$color = NULL
+g = visNetwork(Nodes, Edges, width = "100%")
+  
+g
+
+```
+
+***
+
+**FEATURES**
+
+- **SY001:** School (providers) and their locations
+- **SY002:**	Schools student enrolments in primary & secondary
+- **SY003:** Enrolments in schools
+- **SY004:** School provider and their funding
+- **SY005:** School providers and their campuses (linking primary/secondary and location)
+- **SY006:** Enhancing School providers
+- **SY007:** Enhancing School provider locations
+- **SY008:**	Enhancing School Students
+- **SY009:**	NAPLAN ??
+
+###  CONONICAL INFORMATION MODEL - ENTITY RELATIONSHIP VIEW FOR THE EARLY CHILDHOOD SECTOR
+
+```{r}
+visNetwork(Nodes, Edges, width = "100%")
+```
+
+***
+
+**FEATURES**
+
+- **CC001:** Child care & Preschool providers and their locations
+- **CC002:** ECCC enrolments
+- **CC003:** Funding by ECCC provider
+- **CC004:** Enrolments at a ECCC provider
+- **CC005:** Enhancement of ECCC *provider* object (via linking multiple sources)
+- **CC006:** Enhancement of ECCC *provider location* object (via linking multiple sources)
+- **CC007:** Enhancement of ECCC *child* object (via linking multiple sources)
+- **CC008:** Link child to family 
+
+###  CONONICAL INFORMATION MODEL - ENTITY RELATIONSHIP VIEW FOR THE HIGHER EDUCATION SECTOR
+
+```{r}
+visNetwork(Nodes, Edges, width = "100%")
+```
+
+***
+
+**FEATURES**
+
+- **HE001:** Higher education student enrolments in courses
+- **HE002:** Higher education providers and their registered states and territories
+- **HE003:** Higher education student completions in courses
+- **HE004:** Higher education enrolments and completions at a provider
+- **HE005:** Higher education provider and their funding
+- **HE006:** Higher education providers and their campuses (linking course and location)
+- **HE007:** HE providers and their more detailed locations (postcode, street address etc.)
+- **HE008:** Integrated list of higher education providers (via linking multiple sources)
+- **HE009:** Enhancement of higher education *student* object (via linking multiple sources)
+- **HE010:** Enhancement of higher education *courses* object (via linking multiple sources)
+
+###  CONONICAL INFORMATION MODEL - ENTITY RELATIONSHIP VIEW FOR THE SKILLS & TRAINING SECTOR
+
+```{r}
+visNetwork(Nodes, Edges, width = "100%")
+```
+
+***
+
+**FEATURES**
+
+- **VET001:** VET providers and their locations
+- **VET002:** Students enrolled in VET courses
+- **VET003:** Students completing an apprenticeship
+- **VET004:** VET providers and their funding
+- **VET005:** VET providers and their location (linking course and location)
+- **VET006:** VET students and their locations
+- **VET007:** VET providers and their more detailed locations (postcode, street address etc.)
+- **VET008:** Integrated list of VET providers (via linking multiple sources)
+- **VET009:** Enhancement of VET *student* object (via linking multiple sources)
+- **VET010:** Enhancement of VET *courses* object (via linking multiple sources)
