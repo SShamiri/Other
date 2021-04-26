@@ -45,26 +45,68 @@ header <- dashboardHeader(
 #navbar = bs4DashNavbar(h2('Nowcasting'))
 
 # sidebar
-sidebar = dashboardSidebar(
-  fixed = TRUE, skin = "light", status = "primary", id = "sidebar",
-  #sidebarUserPanel(name="logo",subtitle = "Test",image = "www/SamuelShamiri.jpg"),
-  sidebarMenu(
-    id = "current_tab", flat = FALSE, compact = FALSE, childIndent = TRUE,
-    menuItem("National view", tabName = "national", icon = icon("laptop-code")),
-    menuItem("Regional view", icon = icon("bar-chart-o"), startExpanded = TRUE,
-             menuSubItem("State", tabName = "state"),
-             menuSubItem("SA4 level", tabName = "sa4")
+# sidebar = dashboardSidebar(
+#   fixed = TRUE, skin = "light", status = "primary", id = "sidebar",
+#   #sidebarUserPanel(name="logo",subtitle = "Test",image = "www/SamuelShamiri.jpg"),
+#   sidebarMenu(
+#     id = "current_tab", flat = FALSE, compact = FALSE, childIndent = TRUE,
+#     bs4SidebarMenuItem("National view", tabName = "national", ionicon(name ="heart")),
+#     menuItem("Regional view", icon = icon("bar-chart-o"), startExpanded = TRUE,
+#              menuSubItem("State", tabName = "state"),
+#              menuSubItem("SA4 level", tabName = "sa4")
+#     ),
+#     menuItem("Occupation view", icon = icon("bar-chart-o"), startExpanded = TRUE,
+#              menuSubItem("ANZSCO4", tabName = "anzsco4"),
+#              menuSubItem("ANZSCO6", tabName = "anzsco6")
+#     ),
+#     menuItem("Detail view", icon = icon("th"), tabName = "detial"),
+#     menuItem("Methodology", icon = icon("th"), tabName = "method")
+#   )
+# )
+sidebar = bs4DashSidebar(
+  bs4SidebarMenu(
+    #bs4SidebarHeader("Classic Items"),
+    bs4SidebarMenuItem(
+      text = "National view",
+      icon = "bars",
+      tabName = "item3"
     ),
-    menuItem("Occupation view", icon = icon("bar-chart-o"), startExpanded = TRUE,
-             menuSubItem("ANZSCO4", tabName = "anzsco4"),
-             menuSubItem("ANZSCO6", tabName = "anzsco6")
+    #bs4SidebarHeader("List of items 1"),
+    bs4SidebarMenuItem(
+      text = "Regional view",
+      icon = "bars",
+      startExpanded = TRUE,
+      bs4SidebarMenuSubItem(
+        text = "State",
+        tabName = "item1",
+        icon = "circle-thin"
+      ),
+      bs4SidebarMenuSubItem(
+        text = "SA4 level",
+        tabName = "item2",
+        icon = "circle-thin"
+      )
     ),
-    menuItem("Detail view", icon = icon("th"), tabName = "detial"),
-    menuItem("Methodology", icon = icon("th"), tabName = "method")
+    
+    #bs4SidebarHeader("List of items 2"),
+    bs4SidebarMenuItem(
+      text = "Occupation view",
+      icon = "bars",
+      startExpanded = FALSE,
+      #active = FALSE,
+      bs4SidebarMenuSubItem(
+        text = "ANZSCO4",
+        tabName = "item4",
+        icon = "circle-thin"
+      ),
+      bs4SidebarMenuSubItem(
+        text = "ANZSCO6",
+        tabName = "item5",
+        icon = "circle-thin"
+      )
+    )
   )
 )
-
-
 
 # controlbar
 controlbar = dashboardControlbar(id = "controlbar", skin = "light", pinned = TRUE, overlay = FALSE)
