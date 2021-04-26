@@ -1,6 +1,5 @@
 
 
-
 server = function(input, output) {
   # filters --------------------------------------------------------
   state <- reactive({
@@ -29,7 +28,7 @@ server = function(input, output) {
     req(input$anzsco4_filter)
     
     df_sa4() %>% 
-    e_charts(extraction_date) %>%
+      e_charts(extraction_date) %>%
       e_datazoom(
         type = "slider", 
         toolbox = FALSE,
@@ -48,4 +47,22 @@ server = function(input, output) {
     #   #e_theme("shine")
   })
 
+  # --- Map --------------------------------
+  
+  # Leaflet map 
+  output$map = renderLeaflet({
+    leaflet(sa4_json) %>%
+      addTiles() %>%
+      addPolygons(color = "#444444", weight = 1, smoothFactor = 0.5,
+                  opacity = 1.0, fillOpacity = 0.5,
+                  fillColor = ~pal(sa4_json$SA4_NAME16),
+                  label = sa4_json$SA4_NAME16,
+                  highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                      bringToFront = TRUE)
+      )
+  })
+  # store the click
+  observeEvent(input$map_marker_click,{
+    data_of_click$clickedMarker <- input$map_marker_click
+  })
 }
