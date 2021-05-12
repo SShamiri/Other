@@ -1,68 +1,14 @@
 
+source("server_elements/nat_view_server.R")
+source("server_elements/reg_view_server.R")
+source("server_elements/occ_view_server.R")
+source("server_elements/detail_view_server.R")
 
-server = function(input, output) {
-  # filters --------------------------------------------------------
-  state <- reactive({
-    filter(df_filter, state_name == input$state_filter)
-  })
-  observeEvent(state(), {
-    choices <- unique(state()$sa4_name)
-    updateSelectInput(inputId = "sa4_filter", choices = choices) 
-  })
+server <- function(input, output, session) {
+  nat_view_server("nat_view")
+  sa4_view_server("sa4_view") 
+  occ4_view_server("occ4_view", tabname = reactive(input$tabname))
+  detail_view_server("detail_view")
   
-  sa4 <- reactive({
-    req(input$sa4_filter)
-    filter(state(), sa4_name == input$sa4_filter)
-  })
-  observeEvent(sa4(), {
-    choices <- unique(sa4()$anzsco4_name)
-    updateSelectInput(inputId = "anzsco4_filter", choices = choices)
-  })
-  # plots -------------------------------------------------------------------
-  # this is not reactive but just for fixing the plot size on the client side.
-  df_sa4 <- reactive({
-    filter(dat, state_name == input$state_filter, sa4_name == input$sa4_filter,anzsco4_name == input$anzsco4_filter)
-  })
-  
-  output$sa4_plot <- renderEcharts4r({
-    req(input$anzsco4_filter)
-    
-    df_sa4() %>% 
-      e_charts(extraction_date) %>%
-      e_datazoom(
-        type = "slider", 
-        toolbox = FALSE,
-        bottom = -5
-      ) %>% 
-      e_tooltip() %>% 
-      e_title("Selected SA4") %>% 
-      e_x_axis(extraction_date, axisPointer = list(show = TRUE)) %>%
-      e_line(prediction)
-    
-    # df_sa4() %>% 
-    #   e_charts(extraction_date) %>%
-    #   e_river(prediction) %>%
-    #   e_tooltip(trigger = "axis") %>%
-    #   e_title("River charts", "(Streamgraphs)") 
-    #   #e_theme("shine")
-  })
+} 
 
-  # --- Map --------------------------------
-  
-  # Leaflet map 
-  output$map = renderLeaflet({
-    leaflet(sa4_json) %>%
-      addTiles() %>%
-      addPolygons(color = "#444444", weight = 1, smoothFactor = 0.5,
-                  opacity = 1.0, fillOpacity = 0.5,
-                  fillColor = ~pal(sa4_json$SA4_NAME16),
-                  label = sa4_json$SA4_NAME16,
-                  highlightOptions = highlightOptions(color = "white", weight = 2,
-                                                      bringToFront = TRUE)
-      )
-  })
-  # store the click
-  observeEvent(input$map_marker_click,{
-    data_of_click$clickedMarker <- input$map_marker_click
-  })
-}
